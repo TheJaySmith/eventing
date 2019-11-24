@@ -17,14 +17,16 @@ limitations under the License.
 package resources
 
 import (
+	"fmt"
 	"testing"
 
 	v1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/knative/eventing/pkg/apis/sources/v1alpha1"
+	"knative.dev/eventing/pkg/apis/sources/v1alpha1"
+	"knative.dev/pkg/kmp"
 )
 
 func TestMakeReceiveAdapter(t *testing.T) {
@@ -32,6 +34,7 @@ func TestMakeReceiveAdapter(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "source-name",
 			Namespace: "source-namespace",
+			UID:       "source-uid",
 		},
 		Spec: v1alpha1.CronJobSourceSpec{
 			ServiceAccountName: "source-svc-acct",
@@ -54,8 +57,8 @@ func TestMakeReceiveAdapter(t *testing.T) {
 	yes := true
 	want := &v1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace:    "source-namespace",
-			GenerateName: "cronjob-source-name-",
+			Namespace: "source-namespace",
+			Name:      fmt.Sprintf("cronjobsource-%s-%s", src.Name, src.UID),
 			Labels: map[string]string{
 				"test-key1": "test-value1",
 				"test-key2": "test-value2",
@@ -63,7 +66,8 @@ func TestMakeReceiveAdapter(t *testing.T) {
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion:         "sources.eventing.knative.dev/v1alpha1",
 				Kind:               "CronJobSource",
-				Name:               "source-name",
+				Name:               src.Name,
+				UID:                src.UID,
 				Controller:         &yes,
 				BlockOwnerDeletion: &yes,
 			}},
@@ -89,6 +93,10 @@ func TestMakeReceiveAdapter(t *testing.T) {
 						{
 							Name:  "receive-adapter",
 							Image: "test-image",
+							Ports: []corev1.ContainerPort{{
+								Name:          "metrics",
+								ContainerPort: 9090,
+							}},
 							Env: []corev1.EnvVar{
 								{
 									Name:  "SCHEDULE",
@@ -110,6 +118,28 @@ func TestMakeReceiveAdapter(t *testing.T) {
 									Name:  "NAMESPACE",
 									Value: "source-namespace",
 								},
+								{
+									Name:  "METRICS_DOMAIN",
+									Value: "knative.dev/eventing",
+								},
+								{
+									Name:  "K_METRICS_CONFIG",
+									Value: "",
+								},
+								{
+									Name:  "K_LOGGING_CONFIG",
+									Value: "",
+								},
+							},
+							Resources: corev1.ResourceRequirements{
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("250m"),
+									corev1.ResourceMemory: resource.MustParse("512Mi"),
+								},
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("250m"),
+									corev1.ResourceMemory: resource.MustParse("512Mi"),
+								},
 							},
 						},
 					},
@@ -118,7 +148,9 @@ func TestMakeReceiveAdapter(t *testing.T) {
 		},
 	}
 
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("unexpected cron job (-want, +got) = %v", diff)
+	if diff, err := kmp.SafeDiff(want, got); err != nil {
+		t.Errorf("unexpected cron job resources (-want, +got) = %v", err)
+	} else if diff != "" {
+		t.Errorf("Unexpected deployment (-want +got) = %v", diff)
 	}
 }

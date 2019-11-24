@@ -17,66 +17,79 @@ limitations under the License.
 package cronjobsource
 
 import (
+	"context"
 	"fmt"
-	"os"
 	"testing"
+
+	"knative.dev/pkg/resolver"
+
+	"knative.dev/pkg/configmap"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	kubeinformers "k8s.io/client-go/informers"
-	fakekubeclientset "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	clientgotesting "k8s.io/client-go/testing"
 
-	sourcesv1alpha1 "github.com/knative/eventing/pkg/apis/sources/v1alpha1"
-	fakeclientset "github.com/knative/eventing/pkg/client/clientset/versioned/fake"
-	informers "github.com/knative/eventing/pkg/client/informers/externalversions"
-	"github.com/knative/eventing/pkg/duck"
-	"github.com/knative/eventing/pkg/reconciler"
-	"github.com/knative/eventing/pkg/reconciler/cronjobsource/resources"
-	"github.com/knative/eventing/pkg/utils"
-	duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
-	"github.com/knative/pkg/controller"
-	logtesting "github.com/knative/pkg/logging/testing"
+	duckv1alpha1 "knative.dev/pkg/apis/duck/v1alpha1"
+	duckv1beta1 "knative.dev/pkg/apis/duck/v1beta1"
+	"knative.dev/pkg/controller"
 
-	. "github.com/knative/eventing/pkg/reconciler/testing"
-	. "github.com/knative/pkg/reconciler/testing"
+	sourcesv1alpha1 "knative.dev/eventing/pkg/apis/sources/v1alpha1"
+	"knative.dev/eventing/pkg/reconciler"
+	"knative.dev/eventing/pkg/reconciler/cronjobsource/resources"
+	"knative.dev/eventing/pkg/utils"
+
+	logtesting "knative.dev/pkg/logging/testing"
+	. "knative.dev/pkg/reconciler/testing"
+
+	. "knative.dev/eventing/pkg/reconciler/testing"
 )
 
 var (
-	sinkRef = corev1.ObjectReference{
-		Name:       sinkName,
-		Kind:       "Channel",
-		APIVersion: "eventing.knative.dev/v1alpha1",
-	}
-	brokerRef = corev1.ObjectReference{
-		Name:       sinkName,
-		Kind:       "Broker",
-		APIVersion: "eventing.knative.dev/v1alpha1",
-	}
-	sinkDNS = "sink.mynamespace.svc." + utils.GetClusterDomainName()
-	sinkURI = "http://" + sinkDNS + "/"
-
 	trueVal  = true
 	ownerRef = metav1.OwnerReference{
 		APIVersion:         "sources.eventing.knative.dev/v1alpha1",
 		Kind:               "CronJobSource",
 		Name:               sourceName,
+		UID:                sourceUID,
 		Controller:         &trueVal,
 		BlockOwnerDeletion: &trueVal,
 	}
+	eventTypeName = fmt.Sprintf("dev.knative.cronjob.event-%s", sourceUID)
+
+	sinkDest = duckv1beta1.Destination{
+		Ref: &corev1.ObjectReference{
+			Name:       sinkName,
+			Kind:       "Channel",
+			APIVersion: "messaging.knative.dev/v1alpha1",
+		},
+	}
+	brokerDest = duckv1beta1.Destination{
+		Ref: &corev1.ObjectReference{
+			Name:       sinkName,
+			Kind:       "Broker",
+			APIVersion: "eventing.knative.dev/v1alpha1",
+		},
+	}
+	sinkDNS          = "sink.mynamespace.svc." + utils.GetClusterDomainName()
+	sinkURI          = "http://" + sinkDNS
+	sinkURIReference = "/foo"
+	sinkTargetURI    = sinkURI + sinkURIReference
 )
 
 const (
 	image        = "github.com/knative/test/image"
 	sourceName   = "test-cronjob-source"
+	sourceUID    = "1234"
 	testNS       = "testnamespace"
 	testSchedule = "*/2 * * * *"
 	testData     = "data"
 
-	sinkName = "testsink"
+	sinkName   = "testsink"
+	generation = 1
 )
 
 func init() {
@@ -84,8 +97,6 @@ func init() {
 	_ = appsv1.AddToScheme(scheme.Scheme)
 	_ = corev1.AddToScheme(scheme.Scheme)
 	_ = duckv1alpha1.AddToScheme(scheme.Scheme)
-
-	_ = os.Setenv("CRONJOB_RA_IMAGE", image)
 }
 
 func TestAllCases(t *testing.T) {
@@ -101,71 +112,89 @@ func TestAllCases(t *testing.T) {
 		}, {
 			Name: "invalid schedule",
 			Objects: []runtime.Object{
-				NewCronSourceJob(sourceName, testNS,
+				NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: "invalid schedule",
 						Data:     testData,
-						Sink:     &sinkRef,
+						Sink:     &sinkDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
+				),
+				NewChannel(sinkName, testNS,
+					WithInitChannelConditions,
+					WithChannelAddress(sinkDNS),
 				),
 			},
 			Key:     testNS + "/" + sourceName,
 			WantErr: true,
-			//WantEvents: []string{
-			//	Eventf(corev1.EventTypeWarning, "Fail", ""), // TODO: BUGBUGBUG This should make an event.
-			//},
+			WantEvents: []string{
+				Eventf(corev1.EventTypeWarning, "CronJobSourceUpdateStatusFailed",
+					"Failed to update CronJobSource's status: invalid schedule: expected exactly 5 fields, found 2: [invalid schedule]"),
+			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
-				Object: NewCronSourceJob(sourceName, testNS,
+				Object: NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: "invalid schedule",
 						Data:     testData,
-						Sink:     &sinkRef,
+						Sink:     &sinkDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
 					// Status Update:
 					WithInitCronJobSourceConditions,
+					WithCronJobSourceStatusObservedGeneration(generation),
 					WithInvalidCronJobSourceSchedule,
+					WithCronJobSourceSink(sinkURI),
 				),
 			}},
 		}, {
 			Name: "missing sink",
 			Objects: []runtime.Object{
-				NewCronSourceJob(sourceName, testNS,
+				NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: testSchedule,
 						Data:     testData,
-						Sink:     &sinkRef,
+						Sink:     &sinkDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
 				),
 			},
 			Key:     testNS + "/" + sourceName,
 			WantErr: true,
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
-				Object: NewCronSourceJob(sourceName, testNS,
+				Object: NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: testSchedule,
 						Data:     testData,
-						Sink:     &sinkRef,
+						Sink:     &sinkDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
 					// Status Update:
 					WithInitCronJobSourceConditions,
-					WithValidCronJobSourceSchedule,
+					WithCronJobSourceStatusObservedGeneration(generation),
 					WithCronJobSourceSinkNotFound,
 				),
 			}},
 		}, {
 			Name: "valid",
 			Objects: []runtime.Object{
-				NewCronSourceJob(sourceName, testNS,
+				NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: testSchedule,
 						Data:     testData,
-						Sink:     &sinkRef,
+						Sink:     &sinkDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
 				),
 				NewChannel(sinkName, testNS,
 					WithInitChannelConditions,
 					WithChannelAddress(sinkDNS),
 				),
+				makeAvailableReceiveAdapter(sinkDest),
 			},
 			Key: testNS + "/" + sourceName,
 			WantEvents: []string{
@@ -173,37 +202,41 @@ func TestAllCases(t *testing.T) {
 				Eventf(corev1.EventTypeNormal, "CronJobSourceReadinessChanged", `CronJobSource %q became ready`, sourceName),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
-				Object: NewCronSourceJob(sourceName, testNS,
+				Object: NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: testSchedule,
 						Data:     testData,
-						Sink:     &sinkRef,
+						Sink:     &sinkDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
 					// Status Update:
 					WithInitCronJobSourceConditions,
 					WithValidCronJobSourceSchedule,
+					WithValidCronJobSourceResources,
 					WithCronJobSourceDeployed,
 					WithCronJobSourceSink(sinkURI),
 					WithCronJobSourceEventType,
+					WithCronJobSourceStatusObservedGeneration(generation),
 				),
 			}},
-			WantCreates: []metav1.Object{
-				makeReceiveAdapter(),
-			},
 		}, {
 			Name: "valid with event type creation",
 			Objects: []runtime.Object{
-				NewCronSourceJob(sourceName, testNS,
+				NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: testSchedule,
 						Data:     testData,
-						Sink:     &brokerRef,
+						Sink:     &brokerDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
 				),
 				NewBroker(sinkName, testNS,
 					WithInitBrokerConditions,
 					WithBrokerAddress(sinkDNS),
 				),
+				makeAvailableReceiveAdapter(brokerDest),
 			},
 			Key: testNS + "/" + sourceName,
 			WantEvents: []string{
@@ -211,50 +244,55 @@ func TestAllCases(t *testing.T) {
 				Eventf(corev1.EventTypeNormal, "CronJobSourceReadinessChanged", `CronJobSource %q became ready`, sourceName),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
-				Object: NewCronSourceJob(sourceName, testNS,
+				Object: NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: testSchedule,
 						Data:     testData,
-						Sink:     &brokerRef,
+						Sink:     &brokerDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
 					// Status Update:
 					WithInitCronJobSourceConditions,
 					WithValidCronJobSourceSchedule,
+					WithValidCronJobSourceResources,
 					WithCronJobSourceDeployed,
 					WithCronJobSourceEventType,
 					WithCronJobSourceSink(sinkURI),
+					WithCronJobSourceStatusObservedGeneration(generation),
 				),
 			}},
-			WantCreates: []metav1.Object{
-				NewEventType("", testNS,
-					WithEventTypeGenerateName(fmt.Sprintf("%s-", utils.ToDNS1123Subdomain(sourcesv1alpha1.CronJobEventType))),
+			WantCreates: []runtime.Object{
+				NewEventType(eventTypeName, testNS,
 					WithEventTypeLabels(resources.Labels(sourceName)),
 					WithEventTypeType(sourcesv1alpha1.CronJobEventType),
 					WithEventTypeSource(sourcesv1alpha1.CronJobEventSource(testNS, sourceName)),
 					WithEventTypeBroker(sinkName),
 					WithEventTypeOwnerReference(ownerRef)),
-				makeReceiveAdapterWithSink(brokerRef),
 			},
 		}, {
 			Name: "valid with event type deletion and creation",
 			Objects: []runtime.Object{
-				NewCronSourceJob(sourceName, testNS,
+				NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: testSchedule,
 						Data:     testData,
-						Sink:     &brokerRef,
+						Sink:     &brokerDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
 				),
 				NewBroker(sinkName, testNS,
 					WithInitBrokerConditions,
 					WithBrokerAddress(sinkDNS),
 				),
-				NewEventType("name-1", testNS,
+				NewEventType(eventTypeName, testNS,
 					WithEventTypeLabels(resources.Labels(sourceName)),
 					WithEventTypeType("type-1"),
 					WithEventTypeSource(sourcesv1alpha1.CronJobEventSource(testNS, sourceName)),
 					WithEventTypeBroker(sinkName),
 					WithEventTypeOwnerReference(ownerRef)),
+				makeAvailableReceiveAdapter(brokerDest),
 			},
 			Key: testNS + "/" + sourceName,
 			WantEvents: []string{
@@ -262,48 +300,52 @@ func TestAllCases(t *testing.T) {
 				Eventf(corev1.EventTypeNormal, "CronJobSourceReadinessChanged", `CronJobSource %q became ready`, sourceName),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
-				Object: NewCronSourceJob(sourceName, testNS,
+				Object: NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: testSchedule,
 						Data:     testData,
-						Sink:     &brokerRef,
+						Sink:     &brokerDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
 					// Status Update:
 					WithInitCronJobSourceConditions,
 					WithValidCronJobSourceSchedule,
+					WithValidCronJobSourceResources,
 					WithCronJobSourceDeployed,
 					WithCronJobSourceEventType,
 					WithCronJobSourceSink(sinkURI),
+					WithCronJobSourceStatusObservedGeneration(generation),
 				),
 			}},
 			WantDeletes: []clientgotesting.DeleteActionImpl{{
-				Name: "name-1",
+				Name: eventTypeName,
 			}},
-			WantCreates: []metav1.Object{
-				NewEventType("", testNS,
-					WithEventTypeGenerateName(fmt.Sprintf("%s-", utils.ToDNS1123Subdomain(sourcesv1alpha1.CronJobEventType))),
+			WantCreates: []runtime.Object{
+				NewEventType(eventTypeName, testNS,
 					WithEventTypeLabels(resources.Labels(sourceName)),
 					WithEventTypeType(sourcesv1alpha1.CronJobEventType),
 					WithEventTypeSource(sourcesv1alpha1.CronJobEventSource(testNS, sourceName)),
 					WithEventTypeBroker(sinkName),
 					WithEventTypeOwnerReference(ownerRef)),
-				makeReceiveAdapterWithSink(brokerRef),
 			},
 		}, {
 			Name: "valid, existing ra",
 			Objects: []runtime.Object{
-				NewCronSourceJob(sourceName, testNS,
+				NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: testSchedule,
 						Data:     testData,
-						Sink:     &sinkRef,
+						Sink:     &sinkDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
 				),
 				NewChannel(sinkName, testNS,
 					WithInitChannelConditions,
 					WithChannelAddress(sinkDNS),
 				),
-				makeReceiveAdapter(),
+				makeAvailableReceiveAdapter(sinkDest),
 			},
 			Key: testNS + "/" + sourceName,
 			WantEvents: []string{
@@ -311,31 +353,38 @@ func TestAllCases(t *testing.T) {
 				Eventf(corev1.EventTypeNormal, "CronJobSourceReadinessChanged", `CronJobSource %q became ready`, sourceName),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
-				Object: NewCronSourceJob(sourceName, testNS,
+				Object: NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: testSchedule,
 						Data:     testData,
-						Sink:     &sinkRef,
+						Sink:     &sinkDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
 					// Status Update:
 					WithInitCronJobSourceConditions,
 					WithValidCronJobSourceSchedule,
+					WithValidCronJobSourceResources,
 					WithCronJobSourceDeployed,
 					WithCronJobSourceSink(sinkURI),
 					WithCronJobSourceEventType,
+					WithCronJobSourceStatusObservedGeneration(generation),
 				),
 			}},
 		}, {
 			Name: "valid, no change",
 			Objects: []runtime.Object{
-				NewCronSourceJob(sourceName, testNS,
+				NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: testSchedule,
 						Data:     testData,
-						Sink:     &sinkRef,
+						Sink:     &sinkDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
 					WithInitCronJobSourceConditions,
 					WithValidCronJobSourceSchedule,
+					WithValidCronJobSourceResources,
 					WithCronJobSourceDeployed,
 					WithCronJobSourceSink(sinkURI),
 					WithCronJobSourceEventType,
@@ -344,23 +393,46 @@ func TestAllCases(t *testing.T) {
 					WithInitChannelConditions,
 					WithChannelAddress(sinkDNS),
 				),
-				makeReceiveAdapter(),
+				makeAvailableReceiveAdapter(sinkDest),
 			},
 			Key: testNS + "/" + sourceName,
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewCronJobSource(sourceName, testNS,
+					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
+						Schedule: testSchedule,
+						Data:     testData,
+						Sink:     &sinkDest,
+					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
+					// Status Update:
+					WithInitCronJobSourceConditions,
+					WithValidCronJobSourceSchedule,
+					WithValidCronJobSourceResources,
+					WithCronJobSourceDeployed,
+					WithCronJobSourceSink(sinkURI),
+					WithCronJobSourceEventType,
+					WithCronJobSourceStatusObservedGeneration(generation),
+				),
+			}},
 			WantEvents: []string{
 				Eventf(corev1.EventTypeNormal, "CronJobSourceReconciled", `CronJobSource reconciled: "%s/%s"`, testNS, sourceName),
 			},
 		}, {
 			Name: "valid with event type deletion",
 			Objects: []runtime.Object{
-				NewCronSourceJob(sourceName, testNS,
+				NewCronJobSource(sourceName, testNS,
 					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 						Schedule: testSchedule,
 						Data:     testData,
-						Sink:     &sinkRef,
+						Sink:     &sinkDest,
 					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
 					WithInitCronJobSourceConditions,
 					WithValidCronJobSourceSchedule,
+					WithValidCronJobSourceResources,
+					WithValidCronJobSourceResources,
 					WithCronJobSourceDeployed,
 					WithCronJobSourceSink(sinkURI),
 					WithCronJobSourceEventType,
@@ -369,8 +441,8 @@ func TestAllCases(t *testing.T) {
 					WithInitChannelConditions,
 					WithChannelAddress(sinkDNS),
 				),
-				makeReceiveAdapter(),
-				NewEventType("name-1", testNS,
+				makeAvailableReceiveAdapter(sinkDest),
+				NewEventType(eventTypeName, testNS,
 					WithEventTypeLabels(resources.Labels(sourceName)),
 					WithEventTypeType(sourcesv1alpha1.CronJobEventType),
 					WithEventTypeSource(sourcesv1alpha1.CronJobEventSource(testNS, sourceName)),
@@ -378,68 +450,67 @@ func TestAllCases(t *testing.T) {
 					WithEventTypeOwnerReference(ownerRef)),
 			},
 			Key: testNS + "/" + sourceName,
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewCronJobSource(sourceName, testNS,
+					WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
+						Schedule: testSchedule,
+						Data:     testData,
+						Sink:     &sinkDest,
+					}),
+					WithCronJobSourceUID(sourceUID),
+					WithCronJobSourceObjectMetaGeneration(generation),
+					// Status Update:
+					WithInitCronJobSourceConditions,
+					WithValidCronJobSourceSchedule,
+					WithValidCronJobSourceResources,
+					WithCronJobSourceDeployed,
+					WithCronJobSourceSink(sinkURI),
+					WithCronJobSourceEventType,
+					WithCronJobSourceStatusObservedGeneration(generation),
+				),
+			}},
 			WantEvents: []string{
 				Eventf(corev1.EventTypeNormal, "CronJobSourceReconciled", `CronJobSource reconciled: "%s/%s"`, testNS, sourceName),
 			},
 			WantDeletes: []clientgotesting.DeleteActionImpl{{
-				Name: "name-1",
+				Name: eventTypeName,
 			}},
 		},
 	}
 
-	defer logtesting.ClearAll()
-	table.Test(t, MakeFactory(func(listers *Listers, opt reconciler.Options) controller.Reconciler {
+	logger := logtesting.TestLogger(t)
+	table.Test(t, MakeFactory(func(ctx context.Context, listers *Listers, cmw configmap.Watcher) controller.Reconciler {
 		r := &Reconciler{
-			Base:             reconciler.NewBase(opt, controllerAgentName),
-			cronjobLister:    listers.GetCronJobSourceLister(),
-			deploymentLister: listers.GetDeploymentLister(),
-			eventTypeLister:  listers.GetEventTypeLister(),
+			Base:                reconciler.NewBase(ctx, controllerAgentName, cmw),
+			cronjobLister:       listers.GetCronJobSourceLister(),
+			deploymentLister:    listers.GetDeploymentLister(),
+			eventTypeLister:     listers.GetEventTypeLister(),
+			receiveAdapterImage: image,
 		}
-		r.sinkReconciler = duck.NewSinkReconciler(opt, func(string) {})
+		r.sinkResolver = resolver.NewURIResolver(ctx, func(types.NamespacedName) {})
+
 		return r
 	},
 		true,
+		logger,
 	))
 }
 
-func TestNew(t *testing.T) {
-	defer logtesting.ClearAll()
-	kubeClient := fakekubeclientset.NewSimpleClientset()
-	eventingClient := fakeclientset.NewSimpleClientset()
-	eventingInformer := informers.NewSharedInformerFactory(eventingClient, 0)
-	kubeInformer := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
-
-	cronjobInformer := eventingInformer.Sources().V1alpha1().CronJobSources()
-	deploymentInformer := kubeInformer.Apps().V1().Deployments()
-	eventTypeInformer := eventingInformer.Eventing().V1alpha1().EventTypes()
-
-	c := NewController(reconciler.Options{
-		KubeClientSet:     kubeClient,
-		EventingClientSet: eventingClient,
-		Logger:            logtesting.TestLogger(t),
-	},
-		cronjobInformer,
-		deploymentInformer,
-		eventTypeInformer,
-	)
-
-	if c == nil {
-		t.Fatal("Expected NewController to return a non-nil value")
-	}
+func makeAvailableReceiveAdapter(dest duckv1beta1.Destination) *appsv1.Deployment {
+	ra := makeReceiveAdapterWithSink(dest)
+	WithDeploymentAvailable()(ra)
+	return ra
 }
 
-func makeReceiveAdapter() *appsv1.Deployment {
-	return makeReceiveAdapterWithSink(sinkRef)
-}
-
-func makeReceiveAdapterWithSink(ref corev1.ObjectReference) *appsv1.Deployment {
-	source := NewCronSourceJob(sourceName, testNS,
+func makeReceiveAdapterWithSink(dest duckv1beta1.Destination) *appsv1.Deployment {
+	source := NewCronJobSource(sourceName, testNS,
 		WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
 			Schedule: testSchedule,
 			Data:     testData,
-			Sink:     &ref,
+			Sink:     &dest,
 		},
 		),
+		WithCronJobSourceUID(sourceUID),
 		// Status Update:
 		WithInitCronJobSourceConditions,
 		WithValidCronJobSourceSchedule,

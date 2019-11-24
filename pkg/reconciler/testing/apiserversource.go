@@ -17,11 +17,13 @@ limitations under the License.
 package testing
 
 import (
+	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/knative/eventing/pkg/apis/sources/v1alpha1"
+	"k8s.io/apimachinery/pkg/types"
+	"knative.dev/eventing/pkg/apis/sources/v1alpha1"
+	"knative.dev/eventing/pkg/utils"
 )
 
 // ApiServerSourceOption enables further configuration of a ApiServer.
@@ -42,7 +44,13 @@ func NewApiServerSource(name, namespace string, o ...ApiServerSourceOption) *v1a
 	return c
 }
 
-// WithInitApiServerConditions initializes the ApiServerSource's conditions.
+func WithApiServerSourceUID(uid string) ApiServerSourceOption {
+	return func(a *v1alpha1.ApiServerSource) {
+		a.UID = types.UID(uid)
+	}
+}
+
+// WithInitApiServerSourceConditions initializes the ApiServerSource's conditions.
 func WithInitApiServerSourceConditions(s *v1alpha1.ApiServerSource) {
 	s.Status.InitializeConditions()
 }
@@ -57,12 +65,32 @@ func WithApiServerSourceSink(uri string) ApiServerSourceOption {
 	}
 }
 
+func WithApiServerSourceSinkDepRef(uri string) ApiServerSourceOption {
+	return func(s *v1alpha1.ApiServerSource) {
+		s.Status.MarkSinkWarnRefDeprecated(uri)
+	}
+}
+
+func WithApiServerSourceDeploymentUnavailable(s *v1alpha1.ApiServerSource) {
+	// The Deployment uses GenerateName, so its name is empty.
+	name := utils.GenerateFixedName(s, fmt.Sprintf("apiserversource-%s", s.Name))
+	s.Status.PropagateDeploymentAvailability(NewDeployment(name, "any"))
+}
+
 func WithApiServerSourceDeployed(s *v1alpha1.ApiServerSource) {
-	s.Status.MarkDeployed()
+	s.Status.PropagateDeploymentAvailability(NewDeployment("any", "any", WithDeploymentAvailable()))
 }
 
 func WithApiServerSourceEventTypes(s *v1alpha1.ApiServerSource) {
 	s.Status.MarkEventTypes()
+}
+
+func WithApiServerSourceSufficientPermissions(s *v1alpha1.ApiServerSource) {
+	s.Status.MarkSufficientPermissions()
+}
+
+func WithApiServerSourceNoSufficientPermissions(s *v1alpha1.ApiServerSource) {
+	s.Status.MarkNoSufficientPermissions("", `User system:serviceaccount:testnamespace:default cannot get, list, watch resource "namespaces" in API group ""`)
 }
 
 func WithApiServerSourceDeleted(c *v1alpha1.ApiServerSource) {
@@ -73,5 +101,17 @@ func WithApiServerSourceDeleted(c *v1alpha1.ApiServerSource) {
 func WithApiServerSourceSpec(spec v1alpha1.ApiServerSourceSpec) ApiServerSourceOption {
 	return func(c *v1alpha1.ApiServerSource) {
 		c.Spec = spec
+	}
+}
+
+func WithApiServerSourceStatusObservedGeneration(generation int64) ApiServerSourceOption {
+	return func(c *v1alpha1.ApiServerSource) {
+		c.Status.ObservedGeneration = generation
+	}
+}
+
+func WithApiServerSourceObjectMetaGeneration(generation int64) ApiServerSourceOption {
+	return func(c *v1alpha1.ApiServerSource) {
+		c.ObjectMeta.Generation = generation
 	}
 }

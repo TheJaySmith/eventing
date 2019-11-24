@@ -17,8 +17,21 @@ kind: CustomResourceDefinition
 metadata:
   creationTimestamp: null
   labels:
+    eventing.knative.dev/release: devel
     eventing.knative.dev/source: "true"
+    duck.knative.dev/source: "true"
     knative.dev/crd-install: "true"
+  annotations:
+    # TODO add schemas and descriptions
+    registry.knative.dev/eventTypes: |
+      [
+        { "type": "dev.knative.apiserver.resource.add" },
+        { "type": "dev.knative.apiserver.resource.delete" },
+        { "type": "dev.knative.apiserver.resource.update" },
+        { "type": "dev.knative.apiserver.ref.add" },
+        { "type": "dev.knative.apiserver.ref.delete" },
+        { "type": "dev.knative.apiserver.ref.update" }
+      ]
   name: apiserversources.sources.eventing.knative.dev
 spec:
   group: sources.eventing.knative.dev
@@ -33,23 +46,62 @@ spec:
   scope: Namespaced
   subresources:
     status: {}
+  additionalPrinterColumns:
+    - name: Ready
+      type: string
+      JSONPath: ".status.conditions[?(@.type==\"Ready\")].status"
+    - name: Age
+      type: date
+      JSONPath: .metadata.creationTimestamp
   validation:
     openAPIV3Schema:
       properties:
-        apiVersion:
-          type: string
-        kind:
-          type: string
-        metadata:
-          type: object
         spec:
           properties:
             serviceAccountName:
               type: string
               description: "name of the ServiceAccount to use to run the receive adapter. More info: https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/."
             sink:
-              type: object
-              description: "A reference to the object that should receive events."
+              anyOf:
+              - type: object
+                description: "the destination that should receive events."
+                properties:
+                  ref:
+                    type: object
+                    description: "a reference to a Kubernetes object from which to retrieve the target URI."
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    properties:
+                      apiVersion:
+                        type: string
+                        minLength: 1
+                      kind:
+                        type: string
+                        minLength: 1
+                      name:
+                        type: string
+                        minLength: 1
+                  uri:
+                    type: string
+                    description: "the target URI. If ref is provided, this must be relative URI reference."
+              - type: object
+                description: "DEPRECATED: a reference to a Kubernetes object from which to retrieve the target URI."
+                required:
+                - apiVersion
+                - kind
+                - name
+                properties:
+                  apiVersion:
+                    type: string
+                    minLength: 1
+                  kind:
+                    type: string
+                    minLength: 1
+                  name:
+                    type: string
+                    minLength: 1
             mode:
               type: string
               description: "Mode controls the content of the event payload. One of: 'Ref' (only references of resources), 'Resource' (full resource)."
@@ -65,6 +117,19 @@ spec:
                   controller:
                     type: boolean
                     description: "If true, emits the managing controller ref. Only supported for mode=Ref. More info: https://kubernetes.io/docs/concepts/workloads/controllers/garbage-collection/"
+                  labelSelector:
+                    type: object
+                    description: "Label selector restricting this  list of objects to watch by their labels. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/"
+                  controllerSelector:
+                    type: object
+                    description: "Controller selector restricting the list of objects to watch by a controlling owner reference of the specified kind."
+                    properties:
+                      apiVersion:
+                        type: string
+                        description: "API version of the controlling owner reference."
+                      kind:
+                        type: string
+                        description: "Kind of the controlling owner reference."
               type: array
           required:
           - resources
@@ -95,4 +160,7 @@ spec:
             sinkUri:
               type: string
           type: object
-  version: v1alpha1
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true

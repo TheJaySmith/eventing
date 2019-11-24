@@ -25,8 +25,10 @@ import (
 
 	cloudevents "github.com/cloudevents/sdk-go"
 	"github.com/google/go-cmp/cmp"
-	"github.com/knative/eventing/pkg/adapter/apiserver/events"
+	"knative.dev/eventing/pkg/adapter/apiserver/events"
 )
+
+var contentType = "application/json"
 
 func simplePod(name, namespace string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
@@ -83,12 +85,13 @@ func TestMakeAddEvent(t *testing.T) {
 			obj:    simplePod("unit", "test"),
 			want: &cloudevents.Event{
 				Context: cloudevents.EventContextV02{
-					Type:   "dev.knative.apiserver.resource.add",
-					Source: *cloudevents.ParseURLRef("unit-test"),
+					Type:        "dev.knative.apiserver.resource.add",
+					Source:      *cloudevents.ParseURLRef("unit-test"),
+					ContentType: &contentType,
 					Extensions: map[string]interface{}{
 						"subject": "/apis/v1/namespaces/test/pods/unit",
 					},
-				}.AsV02(),
+				}.AsV03(),
 			},
 			wantData: `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"unit","namespace":"test"}}`,
 		},
@@ -120,12 +123,13 @@ func TestMakeUpdateEvent(t *testing.T) {
 			obj:    simplePod("unit", "test"),
 			want: &cloudevents.Event{
 				Context: cloudevents.EventContextV02{
-					Type:   "dev.knative.apiserver.resource.update",
-					Source: *cloudevents.ParseURLRef("unit-test"),
+					Type:        "dev.knative.apiserver.resource.update",
+					Source:      *cloudevents.ParseURLRef("unit-test"),
+					ContentType: &contentType,
 					Extensions: map[string]interface{}{
 						"subject": "/apis/v1/namespaces/test/pods/unit",
 					},
-				}.AsV02(),
+				}.AsV03(),
 			},
 			wantData: `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"unit","namespace":"test"}}`,
 		},
@@ -157,12 +161,13 @@ func TestMakeDeleteEvent(t *testing.T) {
 			obj:    simplePod("unit", "test"),
 			want: &cloudevents.Event{
 				Context: cloudevents.EventContextV02{
-					Type:   "dev.knative.apiserver.resource.delete",
-					Source: *cloudevents.ParseURLRef("unit-test"),
+					Type:        "dev.knative.apiserver.resource.delete",
+					Source:      *cloudevents.ParseURLRef("unit-test"),
+					ContentType: &contentType,
 					Extensions: map[string]interface{}{
 						"subject": "/apis/v1/namespaces/test/pods/unit",
 					},
-				}.AsV02(),
+				}.AsV03(),
 			},
 			wantData: `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"unit","namespace":"test"}}`,
 		},
@@ -195,12 +200,13 @@ func TestMakeAddRefEvent(t *testing.T) {
 			obj:    simplePod("unit", "test"),
 			want: &cloudevents.Event{
 				Context: cloudevents.EventContextV02{
-					Type:   "dev.knative.apiserver.ref.add",
-					Source: *cloudevents.ParseURLRef("unit-test"),
+					Type:        "dev.knative.apiserver.ref.add",
+					Source:      *cloudevents.ParseURLRef("unit-test"),
+					ContentType: &contentType,
 					Extensions: map[string]interface{}{
 						"subject": "/apis/v1/namespaces/test/pods/unit",
 					},
-				}.AsV02(),
+				}.AsV03(),
 			},
 			wantData: `{"kind":"Pod","namespace":"test","name":"unit","apiVersion":"v1"}`,
 		},
@@ -210,12 +216,13 @@ func TestMakeAddRefEvent(t *testing.T) {
 			asController: true,
 			want: &cloudevents.Event{
 				Context: cloudevents.EventContextV02{
-					Type:   "dev.knative.apiserver.ref.add",
-					Source: *cloudevents.ParseURLRef("unit-test"),
+					Type:        "dev.knative.apiserver.ref.add",
+					ContentType: &contentType,
+					Source:      *cloudevents.ParseURLRef("unit-test"),
 					Extensions: map[string]interface{}{
 						"subject": "/apis/v1/namespaces/test/pods/owned",
 					},
-				}.AsV02(),
+				}.AsV03(),
 			},
 			wantData: `{"kind":"ReplicaSet","namespace":"test","name":"unit","apiVersion":"apps/v1"}`,
 		},
@@ -248,12 +255,13 @@ func TestMakeUpdateRefEvent(t *testing.T) {
 			obj:    simplePod("unit", "test"),
 			want: &cloudevents.Event{
 				Context: cloudevents.EventContextV02{
-					Type:   "dev.knative.apiserver.ref.update",
-					Source: *cloudevents.ParseURLRef("unit-test"),
+					Type:        "dev.knative.apiserver.ref.update",
+					Source:      *cloudevents.ParseURLRef("unit-test"),
+					ContentType: &contentType,
 					Extensions: map[string]interface{}{
 						"subject": "/apis/v1/namespaces/test/pods/unit",
 					},
-				}.AsV02(),
+				}.AsV03(),
 			},
 			wantData: `{"kind":"Pod","namespace":"test","name":"unit","apiVersion":"v1"}`,
 		},
@@ -263,12 +271,13 @@ func TestMakeUpdateRefEvent(t *testing.T) {
 			asController: true,
 			want: &cloudevents.Event{
 				Context: cloudevents.EventContextV02{
-					Type:   "dev.knative.apiserver.ref.update",
-					Source: *cloudevents.ParseURLRef("unit-test"),
+					Type:        "dev.knative.apiserver.ref.update",
+					Source:      *cloudevents.ParseURLRef("unit-test"),
+					ContentType: &contentType,
 					Extensions: map[string]interface{}{
 						"subject": "/apis/v1/namespaces/test/pods/owned",
 					},
-				}.AsV02(),
+				}.AsV03(),
 			},
 			wantData: `{"kind":"ReplicaSet","namespace":"test","name":"unit","apiVersion":"apps/v1"}`,
 		},
@@ -301,12 +310,13 @@ func TestMakeDeleteRefEvent(t *testing.T) {
 			obj:    simplePod("unit", "test"),
 			want: &cloudevents.Event{
 				Context: cloudevents.EventContextV02{
-					Type:   "dev.knative.apiserver.ref.delete",
-					Source: *cloudevents.ParseURLRef("unit-test"),
+					Type:        "dev.knative.apiserver.ref.delete",
+					Source:      *cloudevents.ParseURLRef("unit-test"),
+					ContentType: &contentType,
 					Extensions: map[string]interface{}{
 						"subject": "/apis/v1/namespaces/test/pods/unit",
 					},
-				}.AsV02(),
+				}.AsV03(),
 			},
 			wantData: `{"kind":"Pod","namespace":"test","name":"unit","apiVersion":"v1"}`,
 		},
@@ -316,12 +326,13 @@ func TestMakeDeleteRefEvent(t *testing.T) {
 			asController: true,
 			want: &cloudevents.Event{
 				Context: cloudevents.EventContextV02{
-					Type:   "dev.knative.apiserver.ref.delete",
-					Source: *cloudevents.ParseURLRef("unit-test"),
+					Type:        "dev.knative.apiserver.ref.delete",
+					Source:      *cloudevents.ParseURLRef("unit-test"),
+					ContentType: &contentType,
 					Extensions: map[string]interface{}{
 						"subject": "/apis/v1/namespaces/test/pods/owned",
 					},
-				}.AsV02(),
+				}.AsV03(),
 			},
 			wantData: `{"kind":"ReplicaSet","namespace":"test","name":"unit","apiVersion":"apps/v1"}`,
 		},

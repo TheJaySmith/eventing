@@ -20,88 +20,73 @@ limitations under the License.
 package test
 
 import (
-	"context"
 	"flag"
 	"fmt"
+	"log"
 	"strings"
 
-	"github.com/knative/pkg/logging"
-	pkgTest "github.com/knative/pkg/test"
-	testLogging "github.com/knative/pkg/test/logging"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"knative.dev/eventing/test/common"
+	pkgTest "knative.dev/pkg/test"
+	testLogging "knative.dev/pkg/test/logging"
 )
 
-var logger = logging.FromContext(context.Background()).Named("eventing-e2e-testing")
-
 // EventingFlags holds the command line flags specific to knative/eventing.
-var EventingFlags = initializeEventingFlags()
+var EventingFlags *EventingEnvironmentFlags
 
-// Provisioners holds the ClusterChannelProvisioners we want to run test against.
-type Provisioners []string
+// Channels holds the Channels we want to run test against.
+type Channels []metav1.TypeMeta
 
-func (ps *Provisioners) String() string {
-	return fmt.Sprint(*ps)
+func (channels *Channels) String() string {
+	return fmt.Sprint(*channels)
 }
 
-// Set converts the input string to Provisioners.
-// The default CCP we will test against is in-memory.
-func (ps *Provisioners) Set(value string) error {
-	// We'll test against all valid provisioners if we pass "all" through the flag.
-	if value == "all" {
-		for _, provisioner := range validProvisioners {
-			*ps = append(*ps, provisioner)
+// Set converts the input string to Channels.
+// The default Channel we will test against is InMemoryChannel.
+func (channels *Channels) Set(value string) error {
+	for _, channel := range strings.Split(value, ",") {
+		channel := strings.TrimSpace(channel)
+		split := strings.Split(channel, ":")
+		if len(split) != 2 {
+			log.Fatalf("The given Channel name %q is invalid, it needs to be in the form \"apiVersion:Kind\".", channel)
 		}
-		return nil
-	}
-
-	for _, provisioner := range strings.Split(value, ",") {
-		provisioner := strings.TrimSpace(provisioner)
-		if !isValid(provisioner) {
-			logger.Fatalf("The given provisioner %q is not supported, tests cannot be run.\n", provisioner)
+		tm := metav1.TypeMeta{
+			APIVersion: split[0],
+			Kind:       split[1],
+		}
+		if !isValid(tm.Kind) {
+			log.Fatalf("The given channel name %q is invalid, tests cannot be run.\n", channel)
 		}
 
-		*ps = append(*ps, provisioner)
+		*channels = append(*channels, tm)
 	}
 	return nil
 }
 
-// Check if the provisioner is a valid one.
-func isValid(provisioner string) bool {
-	for i := range validProvisioners {
-		if provisioner == validProvisioners[i] {
-			return true
-		}
-	}
-	return false
+// Check if the channel name is valid.
+func isValid(channel string) bool {
+	return strings.HasSuffix(channel, "Channel")
 }
 
 // EventingEnvironmentFlags holds the e2e flags needed only by the eventing repo.
 type EventingEnvironmentFlags struct {
-	Provisioners
-	RunFromMain bool
+	Channels
 }
 
-func initializeEventingFlags() *EventingEnvironmentFlags {
+// InitializeEventingFlags registers flags used by e2e tests, calling flag.Parse() here would fail in
+// go1.13+, see https://github.com/knative/test-infra/issues/1329 for details
+func InitializeEventingFlags() {
 	f := EventingEnvironmentFlags{}
 
-	flag.Var(&f.Provisioners, "clusterChannelProvisioners", "The names of the Channel's clusterChannelProvisioners, which are separated by comma.")
-	flag.BoolVar(&f.RunFromMain, "runFromMain", false, "If runFromMain is set to false, the TestMain will be skipped when we run tests.")
-
+	flag.Var(&f.Channels, "channels", "The names of the channel type metas, separated by comma. Example: \"messaging.knative.dev/v1alpha1:InMemoryChannel,messaging.cloud.google.com/v1alpha1:Channel,messaging.knative.dev/v1alpha1:KafkaChannel\".")
 	flag.Parse()
 
-	// If no provisioner is passed through the flag, initialize it as the DefaultClusterChannelProvisioner.
-	if f.Provisioners == nil || len(f.Provisioners) == 0 {
-		f.Provisioners = []string{DefaultClusterChannelProvisioner}
-	}
-
-	// If we are not running from TestMain, only one single provisioner can be specified.
-	if !f.RunFromMain && len(f.Provisioners) != 1 {
-		logger.Fatal("Only one single provisioner can be specified if you are not running from TestMain.")
+	// If no channel is passed through the flag, initialize it as the DefaultChannel.
+	if f.Channels == nil || len(f.Channels) == 0 {
+		f.Channels = []metav1.TypeMeta{common.DefaultChannel}
 	}
 
 	testLogging.InitializeLogger(pkgTest.Flags.LogVerbose)
-	if pkgTest.Flags.EmitMetrics {
-		testLogging.InitializeMetricExporter("eventing")
-	}
 
-	return &f
+	EventingFlags = &f
 }

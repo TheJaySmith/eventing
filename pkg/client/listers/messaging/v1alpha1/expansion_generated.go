@@ -18,6 +18,14 @@ limitations under the License.
 
 package v1alpha1
 
+// ChannelListerExpansion allows custom methods to be added to
+// ChannelLister.
+type ChannelListerExpansion interface{}
+
+// ChannelNamespaceListerExpansion allows custom methods to be added to
+// ChannelNamespaceLister.
+type ChannelNamespaceListerExpansion interface{}
+
 // InMemoryChannelListerExpansion allows custom methods to be added to
 // InMemoryChannelLister.
 type InMemoryChannelListerExpansion interface{}
@@ -25,3 +33,27 @@ type InMemoryChannelListerExpansion interface{}
 // InMemoryChannelNamespaceListerExpansion allows custom methods to be added to
 // InMemoryChannelNamespaceLister.
 type InMemoryChannelNamespaceListerExpansion interface{}
+
+// ParallelListerExpansion allows custom methods to be added to
+// ParallelLister.
+type ParallelListerExpansion interface{}
+
+// ParallelNamespaceListerExpansion allows custom methods to be added to
+// ParallelNamespaceLister.
+type ParallelNamespaceListerExpansion interface{}
+
+// SequenceListerExpansion allows custom methods to be added to
+// SequenceLister.
+type SequenceListerExpansion interface{}
+
+// SequenceNamespaceListerExpansion allows custom methods to be added to
+// SequenceNamespaceLister.
+type SequenceNamespaceListerExpansion interface{}
+
+// SubscriptionListerExpansion allows custom methods to be added to
+// SubscriptionLister.
+type SubscriptionListerExpansion interface{}
+
+// SubscriptionNamespaceListerExpansion allows custom methods to be added to
+// SubscriptionNamespaceLister.
+type SubscriptionNamespaceListerExpansion interface{}

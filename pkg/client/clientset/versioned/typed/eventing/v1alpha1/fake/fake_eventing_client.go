@@ -19,9 +19,9 @@ limitations under the License.
 package fake
 
 import (
-	v1alpha1 "github.com/knative/eventing/pkg/client/clientset/versioned/typed/eventing/v1alpha1"
 	rest "k8s.io/client-go/rest"
 	testing "k8s.io/client-go/testing"
+	v1alpha1 "knative.dev/eventing/pkg/client/clientset/versioned/typed/eventing/v1alpha1"
 )
 
 type FakeEventingV1alpha1 struct {
@@ -32,20 +32,8 @@ func (c *FakeEventingV1alpha1) Brokers(namespace string) v1alpha1.BrokerInterfac
 	return &FakeBrokers{c, namespace}
 }
 
-func (c *FakeEventingV1alpha1) Channels(namespace string) v1alpha1.ChannelInterface {
-	return &FakeChannels{c, namespace}
-}
-
-func (c *FakeEventingV1alpha1) ClusterChannelProvisioners() v1alpha1.ClusterChannelProvisionerInterface {
-	return &FakeClusterChannelProvisioners{c}
-}
-
 func (c *FakeEventingV1alpha1) EventTypes(namespace string) v1alpha1.EventTypeInterface {
 	return &FakeEventTypes{c, namespace}
-}
-
-func (c *FakeEventingV1alpha1) Subscriptions(namespace string) v1alpha1.SubscriptionInterface {
-	return &FakeSubscriptions{c, namespace}
 }
 
 func (c *FakeEventingV1alpha1) Triggers(namespace string) v1alpha1.TriggerInterface {

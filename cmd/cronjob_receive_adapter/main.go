@@ -17,63 +17,10 @@ limitations under the License.
 package main
 
 import (
-	"flag"
-	"log"
-
-	"github.com/kelseyhightower/envconfig"
-	"github.com/knative/eventing/pkg/adapter/cronjobevents"
-	"github.com/knative/pkg/signals"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-	"golang.org/x/net/context"
+	"knative.dev/eventing/pkg/adapter"
+	"knative.dev/eventing/pkg/adapter/cronjobevents"
 )
 
-type envConfig struct {
-	// Environment variable container schedule.
-	Schedule string `envconfig:"SCHEDULE" required:"true"`
-
-	// Environment variable containing data.
-	Data string `envconfig:"DATA" required:"true"`
-
-	// Sink for messages.
-	Sink string `envconfig:"SINK_URI" required:"true"`
-
-	// Environment variable containing the name of the cron job.
-	Name string `envconfig:"NAME" required:"true"`
-
-	// Environment variable containing the namespace of the cron job.
-	Namespace string `envconfig:"NAMESPACE" required:"true"`
-}
-
 func main() {
-	flag.Parse()
-
-	ctx := context.Background()
-	logCfg := zap.NewProductionConfig()
-	logCfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	logger, err := logCfg.Build()
-	if err != nil {
-		log.Fatalf("Unable to create logger: %v", err)
-	}
-
-	var env envConfig
-	if err := envconfig.Process("", &env); err != nil {
-		log.Fatal("Failed to process env var", zap.Error(err))
-	}
-
-	adapter := &cronjobevents.Adapter{
-		Schedule:  env.Schedule,
-		Data:      env.Data,
-		SinkURI:   env.Sink,
-		Name:      env.Name,
-		Namespace: env.Namespace,
-	}
-
-	logger.Info("Starting Receive Adapter", zap.Reflect("adapter", adapter))
-
-	stopCh := signals.SetupSignalHandler()
-
-	if err := adapter.Start(ctx, stopCh); err != nil {
-		logger.Fatal("Failed to start adapter", zap.Error(err))
-	}
+	adapter.Main("cronjobsource", cronjobevents.NewEnvConfig, cronjobevents.NewAdapter)
 }

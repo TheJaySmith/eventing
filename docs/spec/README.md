@@ -14,9 +14,10 @@ Docs in this directory:
 - [Resource type overview](overview.md)
 - [Interface contracts](interfaces.md)
 - [Object model specification](spec.md)
-
-<!-- TODO(n3wscott): * [Error conditions and reporting](errors.md) -->
-<!-- TODO(n3wscott): * [Sample API usage](normative_examples.md) -->
+- [Channel specification](channel.md) and
+  [older channel (0.6.0) spec](channel_060.md)
+- [Sources specification](sources.md)
+- [Error conditions and reporting](https://knative.dev/docs/serving/spec/knative-api-specification-1.0/#error-signalling)
 
 See the
 [Knative Eventing Docs Architecture](https://www.knative.dev/docs/eventing/#architecture)

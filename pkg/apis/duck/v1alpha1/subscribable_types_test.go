@@ -20,42 +20,61 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	corev1 "k8s.io/api/core/v1"
 )
 
-func TestGetFullType(t *testing.T) {
+func TestSubscribableGetFullType(t *testing.T) {
 	s := &Subscribable{}
 	switch s.GetFullType().(type) {
-	case *Channel:
+	case *SubscribableType:
 		// expected
 	default:
-		t.Errorf("expected GetFullType to return *Channel, got %T", s.GetFullType())
+		t.Errorf("expected GetFullType to return *SubscribableType, got %T", s.GetFullType())
 	}
 }
 
-func TestGetListType(t *testing.T) {
-	c := &Channel{}
+func TestSubscribableGetListType(t *testing.T) {
+	c := &SubscribableType{}
 	switch c.GetListType().(type) {
-	case *ChannelList:
+	case *SubscribableTypeList:
 		// expected
 	default:
-		t.Errorf("expected GetFullType to return *ChannelList, got %T", c.GetListType())
+		t.Errorf("expected GetListType to return *SubscribableTypeList, got %T", c.GetListType())
 	}
 }
 
-func TestPopulate(t *testing.T) {
-	got := &Channel{}
+func TestSubscribablePopulate(t *testing.T) {
+	got := &SubscribableType{}
 
-	want := &Channel{
-		Spec: ChannelSpec{
+	want := &SubscribableType{
+		Spec: SubscribableTypeSpec{
 			Subscribable: &Subscribable{
-				Subscribers: []ChannelSubscriberSpec{{
+				Subscribers: []SubscriberSpec{{
 					UID:           "2f9b5e8e-deb6-11e8-9f32-f2801f1b9fd1",
+					Generation:    1,
 					SubscriberURI: "call1",
 					ReplyURI:      "sink2",
 				}, {
 					UID:           "34c5aec8-deb6-11e8-9f32-f2801f1b9fd1",
+					Generation:    2,
 					SubscriberURI: "call2",
 					ReplyURI:      "sink2",
+				}},
+			},
+		},
+		Status: SubscribableTypeStatus{
+			SubscribableStatus: &SubscribableStatus{
+				// Populate ALL fields
+				Subscribers: []SubscriberStatus{{
+					UID:                "2f9b5e8e-deb6-11e8-9f32-f2801f1b9fd1",
+					ObservedGeneration: 1,
+					Ready:              corev1.ConditionTrue,
+					Message:            "Some message",
+				}, {
+					UID:                "34c5aec8-deb6-11e8-9f32-f2801f1b9fd1",
+					ObservedGeneration: 2,
+					Ready:              corev1.ConditionFalse,
+					Message:            "Some message",
 				}},
 			},
 		},
@@ -67,4 +86,54 @@ func TestPopulate(t *testing.T) {
 		t.Errorf("Unexpected difference (-want, +got): %v", diff)
 	}
 
+}
+
+func TestSubscribableTypeStatusHelperMethods(t *testing.T) {
+	s := &SubscribableStatus{
+		// Populate ALL fields
+		Subscribers: []SubscriberStatus{{
+			UID:                "2f9b5e8e-deb6-11e8-9f32-f2801f1b9fd1",
+			ObservedGeneration: 1,
+			Ready:              corev1.ConditionTrue,
+			Message:            "This is new field",
+		}, {
+			UID:                "34c5aec8-deb6-11e8-9f32-f2801f1b9fd1",
+			ObservedGeneration: 2,
+			Ready:              corev1.ConditionFalse,
+			Message:            "This is new field",
+		}},
+	}
+
+	subscribableTypeStatus := SubscribableTypeStatus{
+		SubscribableStatus: s,
+	}
+
+	/* Test GetSubscribableTypeStatus */
+
+	// Should return SubscribableTypeStatus#SubscribableStatus
+	subscribableStatus := subscribableTypeStatus.GetSubscribableTypeStatus()
+	if subscribableStatus.Subscribers[0].Message != "This is new field" {
+		t.Error("Testing of GetSubscribableTypeStatus failed as the function returned something unexpected")
+	}
+
+	/* Test SetSubscribableTypeStatus */
+
+	// This should set both the fields to same value
+	subscribableTypeStatus.SetSubscribableTypeStatus(*s)
+	if subscribableTypeStatus.SubscribableStatus.Subscribers[0].Message != "This is new field" {
+		t.Error("SetSubscribableTypeStatus didn't work as expected")
+	}
+
+	/* Test AddSubscriberToSubscribableStatus */
+	subscribableTypeStatus.AddSubscriberToSubscribableStatus(SubscriberStatus{
+		UID:                "2f9b5e8e-deb6-11e8-9f32-f2801f1b9fd1",
+		ObservedGeneration: 1,
+		Ready:              corev1.ConditionTrue,
+		Message:            "This is new field",
+	})
+
+	// Check if the subscriber was added to both the fields of SubscribableTypeStatus
+	if len(subscribableTypeStatus.SubscribableStatus.Subscribers) != 3 {
+		t.Error("AddSubscriberToSubscribableStatus didn't add subscriberstatus to both the fields of SubscribableTypeStatus")
+	}
 }

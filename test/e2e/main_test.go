@@ -1,8 +1,5 @@
-// +build e2e
-
 /*
 Copyright 2019 The Knative Authors
-
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -19,61 +16,22 @@ limitations under the License.
 package e2e
 
 import (
-	"reflect"
-	"runtime"
+	"os"
 	"testing"
 
-	"github.com/knative/eventing/test"
+	"knative.dev/eventing/test"
+	"knative.dev/eventing/test/common"
 )
 
-// channelTestMap indicates which test cases we want to run for a given CCP.
-var channelTestMap = map[string][]func(t *testing.T){
-	test.InMemoryProvisioner: {
-		TestSingleBinaryEvent,
-		TestSingleStructuredEvent,
-		TestEventTransformation,
-		TestChannelChain,
-		TestDefaultBrokerWithManyTriggers,
-		TestEventTransformationForTrigger,
-	},
-	test.GCPPubSubProvisioner: {
-		TestSingleBinaryEvent,
-		TestSingleStructuredEvent,
-		TestEventTransformation,
-		TestChannelChain,
-		TestEventTransformationForTrigger,
-	},
-	test.NatssProvisioner: {
-		TestSingleBinaryEvent,
-		TestSingleStructuredEvent,
-		TestEventTransformation,
-		TestChannelChain,
-		TestEventTransformationForTrigger,
-	},
-	test.KafkaProvisioner: {
-		TestSingleBinaryEvent,
-		TestSingleStructuredEvent,
-		TestEventTransformation,
-		TestChannelChain,
-		TestEventTransformationForTrigger,
-	},
-}
+var setup = common.Setup
+var tearDown = common.TearDown
+var channelTestRunner common.ChannelTestRunner
 
-func TestMain(t *testing.T) {
-	// if the main test is not indicated to be run, skip it directly.
-	if !test.EventingFlags.RunFromMain {
-		t.Skip()
+func TestMain(m *testing.M) {
+	test.InitializeEventingFlags()
+	channelTestRunner = common.ChannelTestRunner{
+		ChannelFeatureMap: common.ChannelFeatureMap,
+		ChannelsToTest:    test.EventingFlags.Channels,
 	}
-
-	var provisioners = test.EventingFlags.Provisioners
-	for _, provisioner := range provisioners {
-		// set the current provisioner that is used to run the test cases
-		ClusterChannelProvisionerToTest.Set(provisioner)
-		for _, testFunc := range channelTestMap[provisioner] {
-			funcName := runtime.FuncForPC(reflect.ValueOf(testFunc).Pointer()).Name()
-			baseFuncName := GetBaseFuncName(funcName)
-			t.Logf("Running %q with %q ClusterChannelProvisioner", baseFuncName, provisioner)
-			t.Run(baseFuncName+"-"+provisioner, testFunc)
-		}
-	}
+	os.Exit(m.Run())
 }

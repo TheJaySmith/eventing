@@ -1,18 +1,21 @@
 # Development
 
 This doc explains how to setup a development environment so you can get started
-[contributing](./CONTRIBUTING.md) to Knative Eventing. Also take a look at
-[the development workflow](./CONTRIBUTING.md#workflow) and
-[the test docs](./test/README.md).
+[contributing](https://www.knative.dev/contributing/) to `Knative Eventing`.
+Also take a look at:
+
+- [The pull request workflow](https://www.knative.dev/contributing/contributing/#pull-requests)
+- [How to add and run tests](./test/README.md)
+- [Iterating](#iterating)
 
 ## Getting started
 
 1. Setup [Knative Serving](http://github.com/knative/serving)
 1. [Create and checkout a repo fork](#checkout-your-fork)
+1. [Install a channel implementation](#install-channels)
 
 Once you meet these requirements, you can
-[start the eventing-controller](#starting-eventing-controller) and
-[install a channel provisioner](#installing-a-channel-provisioner)!
+[start the eventing-controller](#starting-eventing-controller).
 
 Before submitting a PR, see also [CONTRIBUTING.md](./CONTRIBUTING.md).
 
@@ -23,10 +26,53 @@ on your cluster.
 
 You must have [`ko`](https://github.com/google/ko) installed.
 
+### Create a cluster and a repo
+
+1. [Set up a kubernetes cluster](https://www.knative.dev/docs/install/)
+   - Follow an install guide up through "Creating a Kubernetes Cluster"
+   - You do _not_ need to install Istio or Knative using the instructions in the
+     guide. Simply create the cluster and come back here.
+   - If you _did_ install Istio/Knative following those instructions, that's
+     fine too, you'll just redeploy over them, below.
+1. Set up a Linux Container repository for pushing images. You can use any
+   container image registry by adjusting the authentication methods and
+   repository paths mentioned in the sections below.
+   - [Google Container Registry quickstart](https://cloud.google.com/container-registry/docs/pushing-and-pulling)
+   - [Docker Hub quickstart](https://docs.docker.com/docker-hub/)
+
+**Note**: You'll need to be authenticated with your `KO_DOCKER_REPO` before
+pushing images. Run `gcloud auth configure-docker` if you are using Google
+Container Registry or `docker login` if you are using Docker Hub.
+
+### Setup your environment
+
+To start your environment you'll need to set these environment variables (we
+recommend adding them to your `.bashrc`):
+
+1. `GOPATH`: If you don't have one, simply pick a directory and add
+   `export GOPATH=...`
+1. `$GOPATH/bin` on `PATH`: This is so that tooling installed via `go get` will
+   work properly.
+1. `KO_DOCKER_REPO`: The docker repository to which developer images should be
+   pushed (e.g. `gcr.io/[gcloud-project]`).
+
+- **Note**: if you are using docker hub to store your images your
+  `KO_DOCKER_REPO` variable should be `docker.io/<username>`.
+- **Note**: Currently Docker Hub doesn't let you create subdirs under your
+  username.
+
+`.bashrc` example:
+
+```shell
+export GOPATH="$HOME/go"
+export PATH="${PATH}:${GOPATH}/bin"
+export KO_DOCKER_REPO='gcr.io/my-gcloud-project-id'
+```
+
 ### Checkout your fork
 
 The Go tools require that you clone the repository to the
-`src/github.com/knative/eventing` directory in your
+`src/knative.dev/eventing` directory in your
 [`GOPATH`](https://github.com/golang/go/wiki/SettingGOPATH).
 
 To check out this repository:
@@ -36,8 +82,8 @@ To check out this repository:
 1. Clone it to your machine:
 
 ```shell
-mkdir -p ${GOPATH}/src/github.com/knative
-cd ${GOPATH}/src/github.com/knative
+mkdir -p ${GOPATH}/src/knative.dev
+cd ${GOPATH}/src/knative.dev
 git clone git@github.com:${YOUR_GITHUB_USERNAME}/eventing.git
 cd eventing
 git remote add upstream git@github.com:knative/eventing.git
@@ -73,20 +119,19 @@ You can access the Eventing Controller's logs with:
 kubectl -n knative-eventing logs $(kubectl -n knative-eventing get pods -l app=eventing-controller -o name)
 ```
 
-## Installing a Channel Provisioner
+## Install Channels
 
-You'll need a `ClusterChannelProvisioner` installed before you can use any
-Channels. Eventing release artifacts include the
-[in-memory-channel](./config/provisioners/in-memory-channel/) out of the box.
-You can install it during development with:
+Install the
+[In-Memory-Channel](https://github.com/knative/eventing/tree/master/config/channels/in-memory-channel)
+since this is the
+[default channel](https://github.com/knative/docs/blob/master/docs/eventing/channels/default-channels.md).
 
 ```shell
-ko apply -f config/provisioners/in-memory-channel/
+ko apply -f config/channels/in-memory-channel/
 ```
 
-There are other `ClusterChannelProvisioner` implementations available under the
-[contrib](./contrib/) subdirectory, but those likely aren't needed for
-development unless you're working on one of them directly.
+Depending on your needs you might want to install other
+[channel implementations](https://github.com/knative/docs/blob/master/docs/eventing/channels/channels-crds.md).
 
 ## Iterating
 

@@ -21,18 +21,28 @@ import (
 	"log"
 
 	cloudevents "github.com/cloudevents/sdk-go"
+	"go.uber.org/zap"
+	"knative.dev/eventing/pkg/kncloudevents"
+	"knative.dev/eventing/pkg/tracing"
 )
 
 func handler(event cloudevents.Event) {
-	log.Printf("%s", event.String())
+	if err := event.Validate(); err == nil {
+		log.Printf("%s", event.Data.([]byte))
+	} else {
+		log.Printf("error validating the event: %v", err)
+	}
 }
 
 func main() {
-	c, err := cloudevents.NewDefaultClient()
+	logger, _ := zap.NewDevelopment()
+	if err := tracing.SetupStaticPublishing(logger.Sugar(), "", tracing.AlwaysSample); err != nil {
+		log.Fatalf("Unable to setup trace publishing: %v", err)
+	}
+	c, err := kncloudevents.NewDefaultClient()
 	if err != nil {
 		log.Fatalf("failed to create client, %v", err)
 	}
 
-	log.Printf("will listen on :8080\n")
 	log.Fatalf("failed to start receiver: %s", c.StartReceiver(context.Background(), handler))
 }

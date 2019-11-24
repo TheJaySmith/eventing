@@ -18,33 +18,15 @@ package v1alpha1
 
 import (
 	"context"
+)
 
-	"github.com/knative/eventing/pkg/apis/eventing"
-	"github.com/knative/pkg/apis"
-	"k8s.io/apimachinery/pkg/api/equality"
+const (
+	brokerLabel = "eventing.knative.dev/broker"
 )
 
 func (t *Trigger) SetDefaults(ctx context.Context) {
 	t.Spec.SetDefaults(ctx)
-
-	if ui := apis.GetUserInfo(ctx); ui != nil {
-		ans := t.GetAnnotations()
-		if ans == nil {
-			ans = map[string]string{}
-			defer t.SetAnnotations(ans)
-		}
-
-		if apis.IsInUpdate(ctx) {
-			old := apis.GetBaseline(ctx).(*Trigger)
-			if equality.Semantic.DeepEqual(old.Spec, t.Spec) {
-				return
-			}
-			ans[eventing.UpdaterAnnotation] = ui.Username
-		} else {
-			ans[eventing.CreatorAnnotation] = ui.Username
-			ans[eventing.UpdaterAnnotation] = ui.Username
-		}
-	}
+	setLabels(t)
 }
 
 func (ts *TriggerSpec) SetDefaults(ctx context.Context) {
@@ -55,16 +37,11 @@ func (ts *TriggerSpec) SetDefaults(ctx context.Context) {
 	if ts.Filter == nil {
 		ts.Filter = &TriggerFilter{}
 	}
+}
 
-	// Note that this logic will need to change once there are other filtering options, as it should
-	// only apply if no other filter is applied.
-	if ts.Filter.SourceAndType == nil {
-		ts.Filter.SourceAndType = &TriggerFilterSourceAndType{}
+func setLabels(t *Trigger) {
+	if len(t.Labels) == 0 {
+		t.Labels = map[string]string{}
 	}
-	if ts.Filter.SourceAndType.Type == "" {
-		ts.Filter.SourceAndType.Type = TriggerAnyFilter
-	}
-	if ts.Filter.SourceAndType.Source == "" {
-		ts.Filter.SourceAndType.Source = TriggerAnyFilter
-	}
+	t.Labels[brokerLabel] = t.Spec.Broker
 }

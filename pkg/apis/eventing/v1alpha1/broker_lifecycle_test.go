@@ -17,17 +17,20 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"context"
+	"fmt"
 	"testing"
 
-	"github.com/knative/eventing/pkg/apis/eventing"
-	"github.com/knative/pkg/apis"
+	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"github.com/google/go-cmp/cmp"
-	duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
 	v1 "k8s.io/api/apps/v1"
-	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+
+	duckv1alpha1 "knative.dev/eventing/pkg/apis/duck/v1alpha1"
+	messagingv1alpha1 "knative.dev/eventing/pkg/apis/messaging/v1alpha1"
+
+	"knative.dev/pkg/apis"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
 )
 
 var (
@@ -35,28 +38,32 @@ var (
 	falseVal = false
 )
 
+var ignoreAllButTypeAndStatus = cmpopts.IgnoreFields(
+	apis.Condition{},
+	"LastTransitionTime", "Message", "Reason", "Severity")
+
 var (
-	brokerConditionReady = duckv1alpha1.Condition{
+	brokerConditionReady = apis.Condition{
 		Type:   BrokerConditionReady,
 		Status: corev1.ConditionTrue,
 	}
 
-	brokerConditionIngress = duckv1alpha1.Condition{
+	brokerConditionIngress = apis.Condition{
 		Type:   BrokerConditionIngress,
 		Status: corev1.ConditionTrue,
 	}
 
-	brokerConditionTriggerChannel = duckv1alpha1.Condition{
+	brokerConditionTriggerChannel = apis.Condition{
 		Type:   BrokerConditionTriggerChannel,
 		Status: corev1.ConditionTrue,
 	}
 
-	brokerConditionFilter = duckv1alpha1.Condition{
+	brokerConditionFilter = apis.Condition{
 		Type:   BrokerConditionFilter,
 		Status: corev1.ConditionTrue,
 	}
 
-	brokerConditionAddressable = duckv1alpha1.Condition{
+	brokerConditionAddressable = apis.Condition{
 		Type:   BrokerConditionAddressable,
 		Status: corev1.ConditionFalse,
 	}
@@ -66,24 +73,24 @@ func TestBrokerGetCondition(t *testing.T) {
 	tests := []struct {
 		name      string
 		bs        *BrokerStatus
-		condQuery duckv1alpha1.ConditionType
-		want      *duckv1alpha1.Condition
+		condQuery apis.ConditionType
+		want      *apis.Condition
 	}{{
 		name: "single condition",
 		bs: &BrokerStatus{
-			Status: duckv1alpha1.Status{
-				Conditions: []duckv1alpha1.Condition{
+			Status: duckv1.Status{
+				Conditions: []apis.Condition{
 					brokerConditionReady,
 				},
 			},
 		},
-		condQuery: duckv1alpha1.ConditionReady,
+		condQuery: apis.ConditionReady,
 		want:      &brokerConditionReady,
 	}, {
 		name: "multiple conditions",
 		bs: &BrokerStatus{
-			Status: duckv1alpha1.Status{
-				Conditions: []duckv1alpha1.Condition{
+			Status: duckv1.Status{
+				Conditions: []apis.Condition{
 					brokerConditionIngress,
 					brokerConditionTriggerChannel,
 					brokerConditionFilter,
@@ -95,8 +102,8 @@ func TestBrokerGetCondition(t *testing.T) {
 	}, {
 		name: "multiple conditions, condition false",
 		bs: &BrokerStatus{
-			Status: duckv1alpha1.Status{
-				Conditions: []duckv1alpha1.Condition{
+			Status: duckv1.Status{
+				Conditions: []apis.Condition{
 					brokerConditionTriggerChannel,
 					brokerConditionFilter,
 					brokerConditionAddressable,
@@ -108,14 +115,14 @@ func TestBrokerGetCondition(t *testing.T) {
 	}, {
 		name: "unknown condition",
 		bs: &BrokerStatus{
-			Status: duckv1alpha1.Status{
-				Conditions: []duckv1alpha1.Condition{
+			Status: duckv1.Status{
+				Conditions: []apis.Condition{
 					brokerConditionAddressable,
 					brokerConditionReady,
 				},
 			},
 		},
-		condQuery: duckv1alpha1.ConditionType("foo"),
+		condQuery: apis.ConditionType("foo"),
 		want:      nil,
 	}}
 
@@ -138,8 +145,8 @@ func TestBrokerInitializeConditions(t *testing.T) {
 		name: "empty",
 		bs:   &BrokerStatus{},
 		want: &BrokerStatus{
-			Status: duckv1alpha1.Status{
-				Conditions: []duckv1alpha1.Condition{{
+			Status: duckv1.Status{
+				Conditions: []apis.Condition{{
 					Type:   BrokerConditionAddressable,
 					Status: corev1.ConditionUnknown,
 				}, {
@@ -166,16 +173,16 @@ func TestBrokerInitializeConditions(t *testing.T) {
 	}, {
 		name: "one false",
 		bs: &BrokerStatus{
-			Status: duckv1alpha1.Status{
-				Conditions: []duckv1alpha1.Condition{{
+			Status: duckv1.Status{
+				Conditions: []apis.Condition{{
 					Type:   BrokerConditionTriggerChannel,
 					Status: corev1.ConditionFalse,
 				}},
 			},
 		},
 		want: &BrokerStatus{
-			Status: duckv1alpha1.Status{
-				Conditions: []duckv1alpha1.Condition{{
+			Status: duckv1.Status{
+				Conditions: []apis.Condition{{
 					Type:   BrokerConditionAddressable,
 					Status: corev1.ConditionUnknown,
 				}, {
@@ -202,16 +209,16 @@ func TestBrokerInitializeConditions(t *testing.T) {
 	}, {
 		name: "one true",
 		bs: &BrokerStatus{
-			Status: duckv1alpha1.Status{
-				Conditions: []duckv1alpha1.Condition{{
+			Status: duckv1.Status{
+				Conditions: []apis.Condition{{
 					Type:   BrokerConditionFilter,
 					Status: corev1.ConditionTrue,
 				}},
 			},
 		},
 		want: &BrokerStatus{
-			Status: duckv1alpha1.Status{
-				Conditions: []duckv1alpha1.Condition{{
+			Status: duckv1.Status{
+				Conditions: []apis.Condition{{
 					Type:   BrokerConditionAddressable,
 					Status: corev1.ConditionUnknown,
 				}, {
@@ -254,7 +261,8 @@ func TestBrokerIsReady(t *testing.T) {
 		markTriggerChannelReady      *bool
 		markIngressChannelReady      *bool
 		markFilterReady              *bool
-		address                      string
+		address                      *apis.URL
+		markIngressSubscriptionOwned bool
 		markIngressSubscriptionReady *bool
 		wantReady                    bool
 	}{{
@@ -263,7 +271,18 @@ func TestBrokerIsReady(t *testing.T) {
 		markTriggerChannelReady:      &trueVal,
 		markIngressChannelReady:      &trueVal,
 		markFilterReady:              &trueVal,
-		address:                      "hostname",
+		address:                      &apis.URL{Scheme: "http", Host: "hostname"},
+		markIngressSubscriptionOwned: true,
+		markIngressSubscriptionReady: &trueVal,
+		wantReady:                    true,
+	}, {
+		name:                         "all happy - deprecated",
+		markIngressReady:             &trueVal,
+		markTriggerChannelReady:      &trueVal,
+		markIngressChannelReady:      &trueVal,
+		markFilterReady:              &trueVal,
+		address:                      &apis.URL{Scheme: "http", Host: "hostname"},
+		markIngressSubscriptionOwned: true,
 		markIngressSubscriptionReady: &trueVal,
 		wantReady:                    true,
 	}, {
@@ -272,7 +291,8 @@ func TestBrokerIsReady(t *testing.T) {
 		markTriggerChannelReady:      &trueVal,
 		markIngressChannelReady:      &trueVal,
 		markFilterReady:              &trueVal,
-		address:                      "hostname",
+		address:                      &apis.URL{Scheme: "http", Host: "hostname"},
+		markIngressSubscriptionOwned: true,
 		markIngressSubscriptionReady: &trueVal,
 		wantReady:                    false,
 	}, {
@@ -281,7 +301,8 @@ func TestBrokerIsReady(t *testing.T) {
 		markTriggerChannelReady:      &falseVal,
 		markIngressChannelReady:      &trueVal,
 		markFilterReady:              &trueVal,
-		address:                      "hostname",
+		address:                      &apis.URL{Scheme: "http", Host: "hostname"},
+		markIngressSubscriptionOwned: true,
 		markIngressSubscriptionReady: &trueVal,
 		wantReady:                    false,
 	}, {
@@ -290,7 +311,8 @@ func TestBrokerIsReady(t *testing.T) {
 		markTriggerChannelReady:      &trueVal,
 		markIngressChannelReady:      &falseVal,
 		markFilterReady:              &trueVal,
-		address:                      "hostname",
+		address:                      &apis.URL{Scheme: "http", Host: "hostname"},
+		markIngressSubscriptionOwned: true,
 		markIngressSubscriptionReady: &trueVal,
 		wantReady:                    false,
 	}, {
@@ -299,7 +321,8 @@ func TestBrokerIsReady(t *testing.T) {
 		markTriggerChannelReady:      &trueVal,
 		markIngressChannelReady:      &trueVal,
 		markFilterReady:              &falseVal,
-		address:                      "hostname",
+		address:                      &apis.URL{Scheme: "http", Host: "hostname"},
+		markIngressSubscriptionOwned: true,
 		markIngressSubscriptionReady: &trueVal,
 		wantReady:                    false,
 	}, {
@@ -308,7 +331,8 @@ func TestBrokerIsReady(t *testing.T) {
 		markTriggerChannelReady:      &trueVal,
 		markIngressChannelReady:      &trueVal,
 		markFilterReady:              &trueVal,
-		address:                      "",
+		address:                      nil,
+		markIngressSubscriptionOwned: true,
 		markIngressSubscriptionReady: &trueVal,
 		wantReady:                    false,
 	}, {
@@ -317,21 +341,34 @@ func TestBrokerIsReady(t *testing.T) {
 		markTriggerChannelReady:      &trueVal,
 		markIngressChannelReady:      &trueVal,
 		markFilterReady:              &trueVal,
-		address:                      "hostname",
+		address:                      &apis.URL{Scheme: "http", Host: "hostname"},
 		markIngressSubscriptionReady: &falseVal,
+		wantReady:                    false,
+	}, {
+		name:                         "ingress subscription not owned",
+		markIngressReady:             &trueVal,
+		markTriggerChannelReady:      &trueVal,
+		markIngressChannelReady:      &trueVal,
+		markFilterReady:              &trueVal,
+		address:                      &apis.URL{Scheme: "http", Host: "hostname"},
+		markIngressSubscriptionOwned: false,
 		wantReady:                    false,
 	}, {
 		name:                         "all sad",
 		markIngressReady:             &falseVal,
 		markTriggerChannelReady:      &falseVal,
-		markIngressChannelReady:      &trueVal,
+		markIngressChannelReady:      &falseVal,
 		markFilterReady:              &falseVal,
-		address:                      "",
-		markIngressSubscriptionReady: &trueVal,
+		address:                      nil,
+		markIngressSubscriptionOwned: true,
+		markIngressSubscriptionReady: &falseVal,
 		wantReady:                    false,
 	}}
+
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
+		testName := fmt.Sprintf("%s", test.name)
+		//			t.Run(test.name, func(t *testing.T) {
+		t.Run(testName, func(t *testing.T) {
 			bs := &BrokerStatus{}
 			if test.markIngressReady != nil {
 				var d *v1.Deployment
@@ -343,7 +380,7 @@ func TestBrokerIsReady(t *testing.T) {
 				bs.PropagateIngressDeploymentAvailability(d)
 			}
 			if test.markTriggerChannelReady != nil {
-				var c *ChannelStatus
+				var c *duckv1alpha1.ChannelableStatus
 				if *test.markTriggerChannelReady {
 					c = TestHelper.ReadyChannelStatus()
 				} else {
@@ -352,7 +389,7 @@ func TestBrokerIsReady(t *testing.T) {
 				bs.PropagateTriggerChannelReadiness(c)
 			}
 			if test.markIngressChannelReady != nil {
-				var c *ChannelStatus
+				var c *duckv1alpha1.ChannelableStatus
 				if *test.markIngressChannelReady {
 					c = TestHelper.ReadyChannelStatus()
 				} else {
@@ -360,8 +397,10 @@ func TestBrokerIsReady(t *testing.T) {
 				}
 				bs.PropagateIngressChannelReadiness(c)
 			}
-			if test.markIngressSubscriptionReady != nil {
-				var sub *SubscriptionStatus
+			if !test.markIngressSubscriptionOwned {
+				bs.MarkIngressSubscriptionNotOwned(&messagingv1alpha1.Subscription{})
+			} else if test.markIngressSubscriptionReady != nil {
+				var sub *messagingv1alpha1.SubscriptionStatus
 				if *test.markIngressSubscriptionReady {
 					sub = TestHelper.ReadySubscriptionStatus()
 				} else {
@@ -384,93 +423,7 @@ func TestBrokerIsReady(t *testing.T) {
 			if test.wantReady != got {
 				t.Errorf("unexpected readiness: want %v, got %v", test.wantReady, got)
 			}
-		})
-	}
-}
 
-func TestBrokerAnnotateUserInfo(t *testing.T) {
-	const (
-		u1 = "oveja@knative.dev"
-		u2 = "cabra@knative.dev"
-		u3 = "vaca@knative.dev"
-	)
-
-	withUserAnns := func(creator, updater string, b *Broker) *Broker {
-		a := b.GetAnnotations()
-		if a == nil {
-			a = map[string]string{}
-			defer b.SetAnnotations(a)
-		}
-
-		a[eventing.CreatorAnnotation] = creator
-		a[eventing.UpdaterAnnotation] = updater
-
-		return b
-	}
-
-	tests := []struct {
-		name       string
-		user       string
-		this       *Broker
-		prev       *Broker
-		wantedAnns map[string]string
-	}{{
-		"create new broker",
-		u1,
-		&Broker{},
-		nil,
-		map[string]string{
-			eventing.CreatorAnnotation: u1,
-			eventing.UpdaterAnnotation: u1,
-		},
-	}, {
-		"update broker which has no annotations without diff",
-		u1,
-		&Broker{},
-		&Broker{},
-		map[string]string{},
-	}, {
-		"update broker which has annotations without diff",
-		u2,
-		withUserAnns(u1, u1, &Broker{}),
-		withUserAnns(u1, u1, &Broker{}),
-		map[string]string{
-			eventing.CreatorAnnotation: u1,
-			eventing.UpdaterAnnotation: u1,
-		},
-	}, {
-		"update broker which has no annotations with diff",
-		u2,
-		&Broker{Spec: BrokerSpec{ChannelTemplate: &ChannelSpec{DeprecatedGeneration: 1}}},
-		&Broker{},
-		map[string]string{
-			eventing.UpdaterAnnotation: u2,
-		}}, {
-		"update broker which has annotations with diff",
-		u3,
-		withUserAnns(u1, u2, &Broker{Spec: BrokerSpec{ChannelTemplate: &ChannelSpec{DeprecatedGeneration: 1}}}),
-		withUserAnns(u1, u2, &Broker{}),
-		map[string]string{
-			eventing.CreatorAnnotation: u1,
-			eventing.UpdaterAnnotation: u3,
-		},
-	}}
-
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			ctx := apis.WithUserInfo(context.Background(), &authv1.UserInfo{
-				Username: test.user,
-			})
-			if test.prev != nil {
-				ctx = apis.WithinUpdate(ctx, test.prev)
-			}
-			test.this.SetDefaults(ctx)
-
-			if got, want := test.this.GetAnnotations(), test.wantedAnns; !cmp.Equal(got, want) {
-				t.Errorf("Annotations = %v, want: %v, diff (-got, +want): %s", got, want, cmp.Diff(got, want))
-			}
 		})
 	}
 }

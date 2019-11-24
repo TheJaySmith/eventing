@@ -17,24 +17,34 @@ limitations under the License.
 package broker
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
-	"github.com/knative/eventing/pkg/apis/eventing/v1alpha1"
-	"github.com/knative/eventing/pkg/reconciler"
-	"github.com/knative/eventing/pkg/reconciler/broker/resources"
-	. "github.com/knative/eventing/pkg/reconciler/testing"
-	"github.com/knative/eventing/pkg/utils"
-	"github.com/knative/pkg/controller"
-	logtesting "github.com/knative/pkg/logging/testing"
-	. "github.com/knative/pkg/reconciler/testing"
+	"knative.dev/pkg/configmap"
+	"knative.dev/pkg/system"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
 	clientgotesting "k8s.io/client-go/testing"
+	eventingduckv1alpha1 "knative.dev/eventing/pkg/apis/duck/v1alpha1"
+	"knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	"knative.dev/eventing/pkg/duck"
+	"knative.dev/eventing/pkg/reconciler"
+	"knative.dev/eventing/pkg/reconciler/broker/resources"
+	. "knative.dev/eventing/pkg/reconciler/testing"
+	"knative.dev/eventing/pkg/utils"
+	"knative.dev/pkg/controller"
+	logtesting "knative.dev/pkg/logging/testing"
+	. "knative.dev/pkg/reconciler/testing"
 )
+
+type channelType string
 
 const (
 	testNS     = "test-namespace"
@@ -47,6 +57,11 @@ const (
 
 	filterContainerName  = "filter"
 	ingressContainerName = "ingress"
+
+	triggerChannel channelType = "TriggerChannel"
+	ingressChannel channelType = "IngressChannel"
+
+	ingressChannelName = "test-broker-kne-ingress"
 )
 
 var (
@@ -72,15 +87,15 @@ var (
 		Kind:    "Channel",
 	}
 
+	imcGVK = metav1.GroupVersionKind{
+		Group:   "messaging.knative.dev",
+		Version: "v1alpha1",
+		Kind:    "InMemoryChannel",
+	}
+
 	serviceGVK = metav1.GroupVersionKind{
 		Version: "v1",
 		Kind:    "Service",
-	}
-
-	provisionerGVK = metav1.GroupVersionKind{
-		Group:   "eventing.knative.dev",
-		Version: "v1alpha1",
-		Kind:    "ClusterChannelProvisioner",
 	}
 )
 
@@ -109,7 +124,7 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithBrokerDeletionTimestamp),
 			},
@@ -119,48 +134,56 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
 			},
-			WantCreates: []metav1.Object{
-				NewChannel("", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner")),
+			WantCreates: []runtime.Object{
+				createChannel(testNS, triggerChannel, false),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
 					WithInitBrokerConditions,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
-					WithTriggerChannelFailed("ChannelFailure", "inducing failure for create channels")),
+					WithBrokerChannel(channel()),
+					WithTriggerChannelFailed("ChannelFailure", "inducing failure for create inmemorychannels")),
 			}},
 			WithReactors: []clientgotesting.ReactionFunc{
-				InduceFailure("create", "channels"),
+				InduceFailure("create", "inmemorychannels"),
 			},
 			WantEvents: []string{
-				Eventf(corev1.EventTypeWarning, brokerReconcileError, "Broker reconcile error: %v", "inducing failure for create channels"),
+				Eventf(corev1.EventTypeWarning, brokerReconcileError, "Broker reconcile error: %v", "inducing failure for create inmemorychannels"),
 			},
 			WantErr: true,
+		},
+		{
+			Name: "Trigger Channel.Create no address",
+			Key:  testKey,
+			Objects: []runtime.Object{
+				NewBroker(brokerName, testNS,
+					WithBrokerChannel(channel()),
+					WithInitBrokerConditions),
+			},
+			WantCreates: []runtime.Object{
+				createChannel(testNS, triggerChannel, false),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewBroker(brokerName, testNS,
+					WithInitBrokerConditions,
+					WithBrokerChannel(channel()),
+					WithTriggerChannelFailed("NoAddress", "Channel does not have an address.")),
+			}},
 		},
 		{
 			Name: "Trigger Channel is not yet Addressable",
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				NewChannel("", testNS,
-					WithInitChannelConditions,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelAddress("")),
+				createChannel(testNS, triggerChannel, false),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithTriggerChannelFailed("NoAddress", "Channel does not have an address.")),
 			}},
@@ -170,31 +193,26 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				NewChannel("", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(triggerChannelHostname)),
+				createChannel(testNS, triggerChannel, true),
 			},
 			WithReactors: []clientgotesting.ReactionFunc{
 				InduceFailure("create", "deployments"),
 			},
-			WantCreates: []metav1.Object{
+			WantCreates: []runtime.Object{
 				NewDeployment(filterDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, filterImage, envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, filterImage, livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithTriggerChannelReady(),
+					WithBrokerTriggerChannel(createTriggerChannelRef()),
 					WithFilterFailed("DeploymentFailure", "inducing failure for create deployments")),
 			}},
 			WantEvents: []string{
@@ -207,29 +225,24 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				NewChannel("", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(triggerChannelHostname)),
+				createChannel(testNS, triggerChannel, true),
 				NewDeployment(filterDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, "some-other-image", envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, "some-other-image", livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 			},
 			WithReactors: []clientgotesting.ReactionFunc{
 				InduceFailure("update", "deployments"),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithTriggerChannelReady(),
+					WithBrokerTriggerChannel(createTriggerChannelRef()),
 					WithFilterFailed("DeploymentFailure", "inducing failure for update deployments")),
 			}},
 			WantUpdates: []clientgotesting.UpdateActionImpl{{
@@ -237,7 +250,7 @@ func TestReconcile(t *testing.T) {
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, filterImage, envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, filterImage, livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 			}},
 			WantEvents: []string{
 				Eventf(corev1.EventTypeWarning, brokerReconcileError, "Broker reconcile error: %v", "inducing failure for update deployments"),
@@ -249,35 +262,30 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				NewChannel("", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(triggerChannelHostname)),
+				createChannel(testNS, triggerChannel, true),
 				NewDeployment(filterDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, filterImage, envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, filterImage, livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 			},
 			WithReactors: []clientgotesting.ReactionFunc{
 				InduceFailure("create", "services"),
 			},
-			WantCreates: []metav1.Object{
+			WantCreates: []runtime.Object{
 				NewService(filterServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.FilterLabels(brokerName)),
-					WithServicePorts(servicePorts(filterContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithTriggerChannelReady(),
+					WithBrokerTriggerChannel(createTriggerChannelRef()),
 					WithFilterFailed("ServiceFailure", "inducing failure for create services")),
 			}},
 			WantEvents: []string{
@@ -290,24 +298,18 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				NewChannel("", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(triggerChannelHostname)),
+				createChannel(testNS, triggerChannel, true),
 				NewDeployment(filterDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, filterImage, envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, filterImage, livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 				NewService(filterServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.FilterLabels(brokerName)),
-					WithServicePorts(servicePorts(filterContainerName, 9090))),
+					WithServicePorts(servicePorts(9090))),
 			},
 			WithReactors: []clientgotesting.ReactionFunc{
 				InduceFailure("update", "services"),
@@ -316,13 +318,14 @@ func TestReconcile(t *testing.T) {
 				Object: NewService(filterServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.FilterLabels(brokerName)),
-					WithServicePorts(servicePorts(filterContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 			}},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithTriggerChannelReady(),
+					WithBrokerTriggerChannel(createTriggerChannelRef()),
 					WithFilterFailed("ServiceFailure", "inducing failure for update services")),
 			}},
 			WantEvents: []string{
@@ -335,42 +338,37 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				NewChannel("", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(triggerChannelHostname)),
+				createChannel(testNS, triggerChannel, true),
 				NewDeployment(filterDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, filterImage, envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, filterImage, livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 				NewService(filterServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.FilterLabels(brokerName)),
-					WithServicePorts(servicePorts(filterContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 			},
 			WithReactors: []clientgotesting.ReactionFunc{
 				InduceFailure("create", "deployments"),
 			},
-			WantCreates: []metav1.Object{
+			WantCreates: []runtime.Object{
 				NewDeployment(ingressDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.IngressLabels(brokerName)),
 					WithDeploymentServiceAccount(ingressSA),
-					WithDeploymentContainer(ingressContainerName, ingressImage, envVars(ingressContainerName), containerPorts(8080)),
+					WithDeploymentContainer(ingressContainerName, ingressImage, livenessProbe(), nil, envVars(ingressContainerName), containerPorts(8080)),
 				),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithTriggerChannelReady(),
 					WithFilterDeploymentAvailable(),
+					WithBrokerTriggerChannel(createTriggerChannelRef()),
 					WithIngressFailed("DeploymentFailure", "inducing failure for create deployments")),
 			}},
 			WantEvents: []string{
@@ -383,29 +381,23 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				NewChannel("", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(triggerChannelHostname)),
+				createChannel(testNS, triggerChannel, true),
 				NewDeployment(filterDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, filterImage, envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, filterImage, livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 				NewService(filterServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.FilterLabels(brokerName)),
-					WithServicePorts(servicePorts(filterContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 				NewDeployment(ingressDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.IngressLabels(brokerName)),
 					WithDeploymentServiceAccount(ingressSA),
-					WithDeploymentContainer(ingressContainerName, ingressImage, envVars(ingressContainerName), containerPorts(9090))),
+					WithDeploymentContainer(ingressContainerName, ingressImage, livenessProbe(), nil, envVars(ingressContainerName), containerPorts(9090))),
 			},
 			WithReactors: []clientgotesting.ReactionFunc{
 				InduceFailure("update", "deployments"),
@@ -415,14 +407,15 @@ func TestReconcile(t *testing.T) {
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.IngressLabels(brokerName)),
 					WithDeploymentServiceAccount(ingressSA),
-					WithDeploymentContainer(ingressContainerName, ingressImage, envVars(ingressContainerName), containerPorts(8080))),
+					WithDeploymentContainer(ingressContainerName, ingressImage, livenessProbe(), nil, envVars(ingressContainerName), containerPorts(8080))),
 			}},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithTriggerChannelReady(),
 					WithFilterDeploymentAvailable(),
+					WithBrokerTriggerChannel(createTriggerChannelRef()),
 					WithIngressFailed("DeploymentFailure", "inducing failure for update deployments")),
 			}},
 			WantEvents: []string{
@@ -435,45 +428,40 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				NewChannel("", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(triggerChannelHostname)),
+				createChannel(testNS, triggerChannel, true),
 				NewDeployment(filterDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, filterImage, envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, filterImage, livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 				NewService(filterServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.FilterLabels(brokerName)),
-					WithServicePorts(servicePorts(filterContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 				NewDeployment(ingressDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.IngressLabels(brokerName)),
 					WithDeploymentServiceAccount(ingressSA),
-					WithDeploymentContainer(ingressContainerName, ingressImage, envVars(ingressContainerName), containerPorts(8080))),
+					WithDeploymentContainer(ingressContainerName, ingressImage, livenessProbe(), nil, envVars(ingressContainerName), containerPorts(8080))),
 			},
 			WithReactors: []clientgotesting.ReactionFunc{
 				InduceFailure("create", "services"),
 			},
-			WantCreates: []metav1.Object{
+			WantCreates: []runtime.Object{
 				NewService(ingressServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.IngressLabels(brokerName)),
-					WithServicePorts(servicePorts(ingressContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithTriggerChannelReady(),
 					WithFilterDeploymentAvailable(),
+					WithBrokerTriggerChannel(createTriggerChannelRef()),
 					WithIngressFailed("ServiceFailure", "inducing failure for create services")),
 			}},
 			WantEvents: []string{
@@ -486,33 +474,27 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				NewChannel("", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(triggerChannelHostname)),
+				createChannel(testNS, triggerChannel, true),
 				NewDeployment(filterDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, filterImage, envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, filterImage, livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 				NewService(filterServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.FilterLabels(brokerName)),
-					WithServicePorts(servicePorts(filterContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 				NewDeployment(ingressDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.IngressLabels(brokerName)),
 					WithDeploymentServiceAccount(ingressSA),
-					WithDeploymentContainer(ingressContainerName, ingressImage, envVars(ingressContainerName), containerPorts(8080))),
+					WithDeploymentContainer(ingressContainerName, ingressImage, livenessProbe(), nil, envVars(ingressContainerName), containerPorts(8080))),
 				NewService(ingressServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.IngressLabels(brokerName)),
-					WithServicePorts(servicePorts(ingressContainerName, 9090))),
+					WithServicePorts(servicePorts(9090))),
 			},
 			WithReactors: []clientgotesting.ReactionFunc{
 				InduceFailure("update", "services"),
@@ -521,14 +503,15 @@ func TestReconcile(t *testing.T) {
 				Object: NewService(ingressServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.IngressLabels(brokerName)),
-					WithServicePorts(servicePorts(ingressContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 			}},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithTriggerChannelReady(),
 					WithFilterDeploymentAvailable(),
+					WithBrokerTriggerChannel(createTriggerChannelRef()),
 					WithIngressFailed("ServiceFailure", "inducing failure for update services")),
 			}},
 			WantEvents: []string{
@@ -541,56 +524,47 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				NewChannel("", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(triggerChannelHostname)),
+				createChannel(testNS, triggerChannel, true),
 				NewDeployment(filterDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, filterImage, envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, filterImage, livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 				NewService(filterServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.FilterLabels(brokerName)),
-					WithServicePorts(servicePorts(filterContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 				NewDeployment(ingressDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.IngressLabels(brokerName)),
 					WithDeploymentServiceAccount(ingressSA),
-					WithDeploymentContainer(ingressContainerName, ingressImage, envVars(ingressContainerName), containerPorts(8080))),
+					WithDeploymentContainer(ingressContainerName, ingressImage, livenessProbe(), nil, envVars(ingressContainerName), containerPorts(8080))),
 				NewService(ingressServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.IngressLabels(brokerName)),
-					WithServicePorts(servicePorts(ingressContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 			},
 			WithReactors: []clientgotesting.ReactionFunc{
-				InduceFailure("create", "channels"),
+				InduceFailure("create", "inmemorychannels"),
 			},
-			WantCreates: []metav1.Object{
-				NewChannel("", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(IngressChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner")),
+			WantCreates: []runtime.Object{
+				createChannel(testNS, ingressChannel, false),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithTriggerChannelReady(),
+					WithBrokerTriggerChannel(createTriggerChannelRef()),
 					WithFilterDeploymentAvailable(),
 					WithIngressDeploymentAvailable(),
 					WithBrokerAddress(fmt.Sprintf("%s.%s.svc.%s", ingressServiceName, testNS, utils.GetClusterDomainName())),
-					WithIngressChannelFailed("ChannelFailure", "inducing failure for create channels")),
+					WithIngressChannelFailed("ChannelFailure", "inducing failure for create inmemorychannels")),
 			}},
 			WantEvents: []string{
-				Eventf(corev1.EventTypeWarning, brokerReconcileError, "Broker reconcile error: %v", "inducing failure for create channels"),
+				Eventf(corev1.EventTypeWarning, brokerReconcileError, "Broker reconcile error: %v", "inducing failure for create inmemorychannels"),
 			},
 			WantErr: true,
 		},
@@ -599,64 +573,52 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				// Use the channel name to avoid conflicting with the ingress one.
-				NewChannel("filter-channel", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(triggerChannelHostname)),
+				createChannel(testNS, triggerChannel, true),
+				createChannel(testNS, ingressChannel, true),
 				NewDeployment(filterDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, filterImage, envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, filterImage, livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 				NewService(filterServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.FilterLabels(brokerName)),
-					WithServicePorts(servicePorts(filterContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 				NewDeployment(ingressDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.IngressLabels(brokerName)),
 					WithDeploymentServiceAccount(ingressSA),
-					WithDeploymentContainer(ingressContainerName, ingressImage, envVars(ingressContainerName), containerPorts(8080))),
+					WithDeploymentContainer(ingressContainerName, ingressImage, livenessProbe(), nil, envVars(ingressContainerName), containerPorts(8080))),
 				NewService(ingressServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.IngressLabels(brokerName)),
-					WithServicePorts(servicePorts(ingressContainerName, 8080))),
-				// Use the channel name to avoid conflicting with the filter one.
-				NewChannel("ingress-channel", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(IngressChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(ingressChannelHostname)),
+					WithServicePorts(servicePorts(8080))),
 			},
-			WantCreates: []metav1.Object{
-				NewSubscription("", testNS,
-					WithSubscriptionGenerateName(ingressSubscriptionGenerateName),
+			WantCreates: []runtime.Object{
+				NewSubscription(ingressSubscriptionGenerateName, testNS,
 					WithSubscriptionOwnerReferences(ownerReferences()),
 					WithSubscriptionLabels(ingressSubscriptionLabels(brokerName)),
-					WithSubscriptionChannel(channelGVK, "ingress-channel"),
+					WithSubscriptionChannel(imcGVK, ingressChannelName),
 					WithSubscriptionSubscriberRef(serviceGVK, ingressServiceName)),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithTriggerChannelReady(),
+					WithBrokerTriggerChannel(createTriggerChannelRef()),
 					WithFilterDeploymentAvailable(),
 					WithIngressDeploymentAvailable(),
 					WithBrokerAddress(fmt.Sprintf("%s.%s.svc.%s", ingressServiceName, testNS, utils.GetClusterDomainName())),
 					WithBrokerIngressChannelReady(),
+					WithBrokerIngressChannel(createIngressChannelRef()),
 					WithBrokerIngressSubscriptionFailed("SubscriptionFailure", "inducing failure for create subscriptions"),
 				),
 			}},
 			WantEvents: []string{
+				Eventf(corev1.EventTypeWarning, ingressSubscriptionCreateFailed, "Broker's subscription create failed: %v", "inducing failure for create subscriptions"),
 				Eventf(corev1.EventTypeWarning, brokerReconcileError, "Broker reconcile error: %v", "inducing failure for create subscriptions"),
 			},
 			WithReactors: []clientgotesting.ReactionFunc{
@@ -669,61 +631,48 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				// Use the channel name to avoid conflicting with the ingress one.
-				NewChannel("filter-channel", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(triggerChannelHostname)),
+				createChannel(testNS, triggerChannel, true),
+				createChannel(testNS, ingressChannel, true),
 				NewDeployment(filterDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, filterImage, envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, filterImage, livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 				NewService(filterServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.FilterLabels(brokerName)),
-					WithServicePorts(servicePorts(filterContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 				NewDeployment(ingressDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.IngressLabels(brokerName)),
 					WithDeploymentServiceAccount(ingressSA),
-					WithDeploymentContainer(ingressContainerName, ingressImage, envVars(ingressContainerName), containerPorts(8080))),
+					WithDeploymentContainer(ingressContainerName, ingressImage, livenessProbe(), nil, envVars(ingressContainerName), containerPorts(8080))),
 				NewService(ingressServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.IngressLabels(brokerName)),
-					WithServicePorts(servicePorts(ingressContainerName, 8080))),
-				// Use the channel name to avoid conflicting with the filter one.
-				NewChannel("ingress-channel", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(IngressChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(ingressChannelHostname)),
-				NewSubscription("subs", testNS,
-					WithSubscriptionGenerateName(ingressSubscriptionGenerateName),
+					WithServicePorts(servicePorts(8080))),
+				NewSubscription(ingressSubscriptionGenerateName, testNS,
 					WithSubscriptionOwnerReferences(ownerReferences()),
 					WithSubscriptionLabels(ingressSubscriptionLabels(brokerName)),
-					WithSubscriptionChannel(channelGVK, "ingress-channel"),
+					WithSubscriptionChannel(channelGVK, ingressChannelName),
 					WithSubscriptionSubscriberRef(serviceGVK, "")),
 			},
 			WantDeletes: []clientgotesting.DeleteActionImpl{{
-				Name: "subs",
+				Name: ingressSubscriptionGenerateName,
 			}},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithTriggerChannelReady(),
+					WithBrokerTriggerChannel(createTriggerChannelRef()),
 					WithFilterDeploymentAvailable(),
 					WithIngressDeploymentAvailable(),
 					WithBrokerAddress(fmt.Sprintf("%s.%s.svc.%s", ingressServiceName, testNS, utils.GetClusterDomainName())),
 					WithBrokerIngressChannelReady(),
+					WithBrokerIngressChannel(createIngressChannelRef()),
 					WithBrokerIngressSubscriptionFailed("SubscriptionFailure", "inducing failure for delete subscriptions"),
 				),
 			}},
@@ -741,69 +690,55 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				// Use the channel name to avoid conflicting with the ingress one.
-				NewChannel("filter-channel", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(triggerChannelHostname)),
+				createChannel(testNS, triggerChannel, true),
+				createChannel(testNS, ingressChannel, true),
 				NewDeployment(filterDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, filterImage, envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, filterImage, livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 				NewService(filterServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.FilterLabels(brokerName)),
-					WithServicePorts(servicePorts(filterContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 				NewDeployment(ingressDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.IngressLabels(brokerName)),
 					WithDeploymentServiceAccount(ingressSA),
-					WithDeploymentContainer(ingressContainerName, ingressImage, envVars(ingressContainerName), containerPorts(8080))),
+					WithDeploymentContainer(ingressContainerName, ingressImage, livenessProbe(), nil, envVars(ingressContainerName), containerPorts(8080))),
 				NewService(ingressServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.IngressLabels(brokerName)),
-					WithServicePorts(servicePorts(ingressContainerName, 8080))),
-				// Use the channel name to avoid conflicting with the filter one.
-				NewChannel("ingress-channel", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(IngressChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(ingressChannelHostname)),
-				NewSubscription("subs", testNS,
-					WithSubscriptionGenerateName(ingressSubscriptionGenerateName),
+					WithServicePorts(servicePorts(8080))),
+				NewSubscription(ingressSubscriptionGenerateName, testNS,
 					WithSubscriptionOwnerReferences(ownerReferences()),
 					WithSubscriptionLabels(ingressSubscriptionLabels(brokerName)),
-					WithSubscriptionChannel(channelGVK, "ingress-channel"),
+					WithSubscriptionChannel(channelGVK, ingressChannelName),
 					WithSubscriptionSubscriberRef(serviceGVK, "")),
 			},
 			WantDeletes: []clientgotesting.DeleteActionImpl{{
-				Name: "subs",
+				Name: ingressSubscriptionGenerateName,
 			}},
-			WantCreates: []metav1.Object{
-				NewSubscription("", testNS,
-					WithSubscriptionGenerateName(ingressSubscriptionGenerateName),
+			WantCreates: []runtime.Object{
+				NewSubscription(ingressSubscriptionGenerateName, testNS,
 					WithSubscriptionOwnerReferences(ownerReferences()),
 					WithSubscriptionLabels(ingressSubscriptionLabels(brokerName)),
-					WithSubscriptionChannel(channelGVK, "ingress-channel"),
+					WithSubscriptionChannel(imcGVK, ingressChannelName),
 					WithSubscriptionSubscriberRef(serviceGVK, ingressServiceName)),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions,
 					WithTriggerChannelReady(),
+					WithBrokerTriggerChannel(createTriggerChannelRef()),
 					WithFilterDeploymentAvailable(),
 					WithIngressDeploymentAvailable(),
 					WithBrokerAddress(fmt.Sprintf("%s.%s.svc.%s", ingressServiceName, testNS, utils.GetClusterDomainName())),
 					WithBrokerIngressChannelReady(),
+					WithBrokerIngressChannel(createIngressChannelRef()),
 					WithBrokerIngressSubscriptionFailed("SubscriptionFailure", "inducing failure for create subscriptions"),
 				),
 			}},
@@ -821,54 +756,41 @@ func TestReconcile(t *testing.T) {
 			Key:  testKey,
 			Objects: []runtime.Object{
 				NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithInitBrokerConditions),
-				// Use the channel name to avoid conflicting with the ingress one.
-				NewChannel("filter-channel", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(TriggerChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(triggerChannelHostname)),
+				createChannel(testNS, triggerChannel, true),
+				createChannel(testNS, ingressChannel, true),
 				NewDeployment(filterDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.FilterLabels(brokerName)),
 					WithDeploymentServiceAccount(filterSA),
-					WithDeploymentContainer(filterContainerName, filterImage, envVars(filterContainerName), nil)),
+					WithDeploymentContainer(filterContainerName, filterImage, livenessProbe(), readinessProbe(), envVars(filterContainerName), containerPorts(8080))),
 				NewService(filterServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.FilterLabels(brokerName)),
-					WithServicePorts(servicePorts(filterContainerName, 8080))),
+					WithServicePorts(servicePorts(8080))),
 				NewDeployment(ingressDeploymentName, testNS,
 					WithDeploymentOwnerReferences(ownerReferences()),
 					WithDeploymentLabels(resources.IngressLabels(brokerName)),
 					WithDeploymentServiceAccount(ingressSA),
-					WithDeploymentContainer(ingressContainerName, ingressImage, envVars(ingressContainerName), containerPorts(8080))),
+					WithDeploymentContainer(ingressContainerName, ingressImage, livenessProbe(), nil, envVars(ingressContainerName), containerPorts(8080))),
 				NewService(ingressServiceName, testNS,
 					WithServiceOwnerReferences(ownerReferences()),
 					WithServiceLabels(resources.IngressLabels(brokerName)),
-					WithServicePorts(servicePorts(ingressContainerName, 8080))),
-				// Use the channel name to avoid conflicting with the filter one.
-				NewChannel("ingress-channel", testNS,
-					WithChannelGenerateName(channelGenerateName),
-					WithChannelLabels(IngressChannelLabels(brokerName)),
-					WithChannelOwnerReferences(ownerReferences()),
-					WithChannelProvisioner(provisionerGVK, "my-provisioner"),
-					WithChannelReady,
-					WithChannelAddress(ingressChannelHostname)),
-				NewSubscription("", testNS,
-					WithSubscriptionGenerateName(ingressSubscriptionGenerateName),
+					WithServicePorts(servicePorts(8080))),
+				NewSubscription(ingressSubscriptionGenerateName, testNS,
 					WithSubscriptionOwnerReferences(ownerReferences()),
 					WithSubscriptionLabels(ingressSubscriptionLabels(brokerName)),
-					WithSubscriptionChannel(channelGVK, "ingress-channel"),
+					WithSubscriptionChannel(imcGVK, ingressChannelName),
 					WithSubscriptionSubscriberRef(serviceGVK, ingressServiceName),
 					WithSubscriptionReady),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewBroker(brokerName, testNS,
-					WithBrokerChannelProvisioner(channelProvisioner("my-provisioner")),
+					WithBrokerChannel(channel()),
 					WithBrokerReady,
+					WithBrokerTriggerChannel(createTriggerChannelRef()),
+					WithBrokerIngressChannel(createIngressChannelRef()),
 					WithBrokerAddress(fmt.Sprintf("%s.%s.svc.%s", ingressServiceName, testNS, utils.GetClusterDomainName())),
 				),
 			}},
@@ -878,22 +800,23 @@ func TestReconcile(t *testing.T) {
 		},
 	}
 
-	defer logtesting.ClearAll()
-	table.Test(t, MakeFactory(func(listers *Listers, opt reconciler.Options) controller.Reconciler {
+	logger := logtesting.TestLogger(t)
+	table.Test(t, MakeFactory(func(ctx context.Context, listers *Listers, cmw configmap.Watcher) controller.Reconciler {
 		return &Reconciler{
-			Base:                      reconciler.NewBase(opt, controllerAgentName),
+			Base:                      reconciler.NewBase(ctx, controllerAgentName, cmw),
 			subscriptionLister:        listers.GetSubscriptionLister(),
 			brokerLister:              listers.GetBrokerLister(),
-			channelLister:             listers.GetChannelLister(),
 			serviceLister:             listers.GetK8sServiceLister(),
 			deploymentLister:          listers.GetDeploymentLister(),
 			filterImage:               filterImage,
 			filterServiceAccountName:  filterSA,
 			ingressImage:              ingressImage,
 			ingressServiceAccountName: ingressSA,
+			channelableTracker:        duck.NewListableTracker(ctx, &eventingduckv1alpha1.Channelable{}, func(types.NamespacedName) {}, 0),
 		}
 	},
 		false,
+		logger,
 	))
 }
 
@@ -907,11 +830,36 @@ func ownerReferences() []metav1.OwnerReference {
 	}}
 }
 
-func channelProvisioner(name string) *corev1.ObjectReference {
-	return &corev1.ObjectReference{
-		APIVersion: "eventing.knative.dev/v1alpha1",
-		Kind:       "ClusterChannelProvisioner",
-		Name:       name,
+func channel() metav1.TypeMeta {
+	return metav1.TypeMeta{
+		APIVersion: "messaging.knative.dev/v1alpha1",
+		Kind:       "InMemoryChannel",
+	}
+}
+
+func livenessProbe() *corev1.Probe {
+	return &corev1.Probe{
+		Handler: corev1.Handler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/healthz",
+				Port: intstr.IntOrString{Type: intstr.Int, IntVal: 8080},
+			},
+		},
+		InitialDelaySeconds: 5,
+		PeriodSeconds:       2,
+	}
+}
+
+func readinessProbe() *corev1.Probe {
+	return &corev1.Probe{
+		Handler: corev1.Handler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/readyz",
+				Port: intstr.IntOrString{Type: intstr.Int, IntVal: 8080},
+			},
+		},
+		InitialDelaySeconds: 5,
+		PeriodSeconds:       2,
 	}
 }
 
@@ -920,6 +868,10 @@ func envVars(containerName string) []corev1.EnvVar {
 	case filterContainerName:
 		return []corev1.EnvVar{
 			{
+				Name:  system.NamespaceEnvKey,
+				Value: system.Namespace(),
+			},
+			{
 				Name: "NAMESPACE",
 				ValueFrom: &corev1.EnvVarSource{
 					FieldRef: &corev1.ObjectFieldSelector{
@@ -927,9 +879,53 @@ func envVars(containerName string) []corev1.EnvVar {
 					},
 				},
 			},
+			{
+				Name: "POD_NAME",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "metadata.name",
+					},
+				},
+			},
+			{
+				Name:  "CONTAINER_NAME",
+				Value: filterContainerName,
+			},
+			{
+				Name:  "BROKER",
+				Value: brokerName,
+			},
+			{
+				Name:  "METRICS_DOMAIN",
+				Value: "knative.dev/internal/eventing",
+			},
 		}
 	case ingressContainerName:
 		return []corev1.EnvVar{
+			{
+				Name:  system.NamespaceEnvKey,
+				Value: system.Namespace(),
+			},
+			{
+				Name: "NAMESPACE",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "metadata.namespace",
+					},
+				},
+			},
+			{
+				Name: "POD_NAME",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "metadata.name",
+					},
+				},
+			},
+			{
+				Name:  "CONTAINER_NAME",
+				Value: ingressContainerName,
+			},
 			{
 				Name:  "FILTER",
 				Value: "",
@@ -941,6 +937,10 @@ func envVars(containerName string) []corev1.EnvVar {
 			{
 				Name:  "BROKER",
 				Value: brokerName,
+			},
+			{
+				Name:  "METRICS_DOMAIN",
+				Value: "knative.dev/internal/eventing",
 			},
 		}
 	}
@@ -960,20 +960,111 @@ func containerPorts(httpInternal int32) []corev1.ContainerPort {
 	}
 }
 
-func servicePorts(containerName string, httpInternal int) []corev1.ServicePort {
+func servicePorts(httpInternal int) []corev1.ServicePort {
 	svcPorts := []corev1.ServicePort{
 		{
 			Name:       "http",
 			Port:       80,
 			TargetPort: intstr.FromInt(httpInternal),
+		}, {
+			Name: "http-metrics",
+			Port: 9090,
 		},
 	}
-	// TODO remove this if once we add metrics to the filter container.
-	if containerName == ingressContainerName {
-		svcPorts = append(svcPorts, corev1.ServicePort{
-			Name: "metrics",
-			Port: 9090,
-		})
-	}
 	return svcPorts
+}
+
+func createChannel(namespace string, t channelType, ready bool) *unstructured.Unstructured {
+	var labels map[string]interface{}
+	var name string
+	var hostname string
+	var url string
+	if t == triggerChannel {
+		name = fmt.Sprintf("%s-kne-trigger", brokerName)
+		labels = map[string]interface{}{
+			"eventing.knative.dev/broker":           brokerName,
+			"eventing.knative.dev/brokerEverything": "true",
+		}
+		hostname = triggerChannelHostname
+		url = fmt.Sprintf("http://%s", triggerChannelHostname)
+	} else {
+		name = fmt.Sprintf("%s-kne-ingress", brokerName)
+		labels = map[string]interface{}{
+			"eventing.knative.dev/broker":        brokerName,
+			"eventing.knative.dev/brokerIngress": "true",
+		}
+		hostname = ingressChannelHostname
+		url = fmt.Sprintf("http://%s", ingressChannelHostname)
+	}
+	if ready {
+		return &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "messaging.knative.dev/v1alpha1",
+				"kind":       "InMemoryChannel",
+				"metadata": map[string]interface{}{
+					"creationTimestamp": nil,
+					"namespace":         namespace,
+					"name":              name,
+					"ownerReferences": []interface{}{
+						map[string]interface{}{
+							"apiVersion":         "eventing.knative.dev/v1alpha1",
+							"blockOwnerDeletion": true,
+							"controller":         true,
+							"kind":               "Broker",
+							"name":               brokerName,
+							"uid":                "",
+						},
+					},
+					"labels": labels,
+				},
+				"status": map[string]interface{}{
+					"address": map[string]interface{}{
+						"hostname": hostname,
+						"url":      url,
+					},
+				},
+			},
+		}
+	}
+
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "messaging.knative.dev/v1alpha1",
+			"kind":       "InMemoryChannel",
+			"metadata": map[string]interface{}{
+				"creationTimestamp": nil,
+				"namespace":         namespace,
+				"name":              name,
+				"ownerReferences": []interface{}{
+					map[string]interface{}{
+						"apiVersion":         "eventing.knative.dev/v1alpha1",
+						"blockOwnerDeletion": true,
+						"controller":         true,
+						"kind":               "Broker",
+						"name":               brokerName,
+						"uid":                "",
+					},
+				},
+				"labels": labels,
+			},
+		},
+	}
+}
+
+func createTriggerChannelRef() *corev1.ObjectReference {
+	return &corev1.ObjectReference{
+		APIVersion: "messaging.knative.dev/v1alpha1",
+		Kind:       "InMemoryChannel",
+		Namespace:  testNS,
+		Name:       fmt.Sprintf("%s-kne-trigger", brokerName),
+	}
+}
+
+func createIngressChannelRef() *corev1.ObjectReference {
+	return &corev1.ObjectReference{
+		APIVersion: "messaging.knative.dev/v1alpha1",
+		Kind:       "InMemoryChannel",
+		Namespace:  testNS,
+		Name:       fmt.Sprintf("%s-kne-ingress", brokerName),
+	}
 }

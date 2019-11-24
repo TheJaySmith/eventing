@@ -17,57 +17,59 @@ limitations under the License.
 package cronjobevents
 
 import (
-	"context"
 	"encoding/json"
-	"io/ioutil"
 	"log"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	kncetesting "knative.dev/eventing/pkg/kncloudevents/testing"
+	"knative.dev/pkg/source"
 )
+
+type mockReporter struct {
+	eventCount int
+}
+
+func (r *mockReporter) ReportEventCount(args *source.ReportArgs, responseCode int) error {
+	r.eventCount++
+	return nil
+}
 
 func TestStart_ServeHTTP(t *testing.T) {
 	testCases := map[string]struct {
 		schedule string
 		sink     func(http.ResponseWriter, *http.Request)
-		reqBody  string
+		data     string
 		error    bool
 	}{
 		"happy": {
 			schedule: "* * * * *", // every minute
 			sink:     sinkAccepted,
-			reqBody:  `{"body":"data"}`,
+			data:     `{"body":"data"}`,
 		},
 		"rejected": {
 			schedule: "* * * * *", // every minute
 			sink:     sinkRejected,
-			reqBody:  `{"body":"data"}`,
+			data:     `{"body":"data"}`,
 			error:    true,
 		},
 	}
 	for n, tc := range testCases {
 		t.Run(n, func(t *testing.T) {
-			h := &fakeHandler{
-				handler: tc.sink,
-			}
-			sinkServer := httptest.NewServer(h)
-			defer sinkServer.Close()
+			ce := kncetesting.NewTestClient()
 
-			a := &Adapter{
+			r := &mockReporter{}
+			a := &cronJobAdapter{
 				Schedule: tc.schedule,
 				Data:     "data",
-				SinkURI:  sinkServer.URL,
-			}
-
-			if err := a.initClient(); err != nil {
-				t.Errorf("failed to create cloudevent client, %v", err)
+				Reporter: r,
+				Client:   ce,
 			}
 
 			stop := make(chan struct{})
 			go func() {
-				if err := a.Start(context.TODO(), stop); err != nil {
+				if err := a.Start(stop); err != nil {
 					if tc.error {
 						// skip
 					} else {
@@ -77,10 +79,9 @@ func TestStart_ServeHTTP(t *testing.T) {
 			}()
 
 			a.cronTick() // force a tick.
+			validateMetric(t, a.Reporter, 1)
+			validateSent(t, ce, tc.data)
 
-			if tc.reqBody != string(h.body) {
-				t.Errorf("expected request body %q, but got %q", tc.reqBody, h.body)
-			}
 			log.Print("test done")
 		})
 	}
@@ -89,56 +90,53 @@ func TestStart_ServeHTTP(t *testing.T) {
 func TestStartBadCron(t *testing.T) {
 	schedule := "bad"
 
-	a := &Adapter{
+	r := &mockReporter{}
+	a := &cronJobAdapter{
 		Schedule: schedule,
+		Reporter: r,
 	}
 
 	stop := make(chan struct{})
-	if err := a.Start(context.TODO(), stop); err == nil {
+	if err := a.Start(stop); err == nil {
 
 		t.Errorf("failed to fail, %v", err)
 
 	}
+
+	validateMetric(t, a.Reporter, 0)
 }
 
 func TestPostMessage_ServeHTTP(t *testing.T) {
 	testCases := map[string]struct {
-		sink    func(http.ResponseWriter, *http.Request)
-		reqBody string
-		error   bool
+		sink  func(http.ResponseWriter, *http.Request)
+		data  string
+		error bool
 	}{
 		"happy": {
-			sink:    sinkAccepted,
-			reqBody: `{"body":"data"}`,
+			sink: sinkAccepted,
+			data: `{"body":"data"}`,
 		},
 		"rejected": {
-			sink:    sinkRejected,
-			reqBody: `{"body":"data"}`,
-			error:   true,
+			sink:  sinkRejected,
+			data:  `{"body":"data"}`,
+			error: true,
 		},
 	}
 	for n, tc := range testCases {
 		t.Run(n, func(t *testing.T) {
-			h := &fakeHandler{
-				handler: tc.sink,
-			}
-			sinkServer := httptest.NewServer(h)
-			defer sinkServer.Close()
 
-			a := &Adapter{
-				Data:    "data",
-				SinkURI: sinkServer.URL,
-			}
+			ce := kncetesting.NewTestClient()
 
-			if err := a.initClient(); err != nil {
-				t.Errorf("failed to create cloudevent client, %v", err)
+			r := &mockReporter{}
+			a := &cronJobAdapter{
+				Data:     "data",
+				Reporter: r,
+				Client:   ce,
 			}
 
 			a.cronTick()
-
-			if tc.reqBody != string(h.body) {
-				t.Errorf("expected request body %q, but got %q", tc.reqBody, h.body)
-			}
+			validateSent(t, ce, tc.data)
+			validateMetric(t, a.Reporter, 1)
 		})
 	}
 }
@@ -179,30 +177,28 @@ func TestMessage(t *testing.T) {
 	}
 }
 
-type fakeHandler struct {
-	body    []byte
-	ran     int
-	handler func(http.ResponseWriter, *http.Request)
-}
-
-func (h *fakeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	body, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "can not read body", http.StatusBadRequest)
-		return
-	}
-	h.body = body
-
-	defer r.Body.Close()
-	h.handler(w, r)
-
-	h.ran++
-}
-
 func sinkAccepted(writer http.ResponseWriter, req *http.Request) {
 	writer.WriteHeader(http.StatusOK)
 }
 
 func sinkRejected(writer http.ResponseWriter, _ *http.Request) {
 	writer.WriteHeader(http.StatusRequestTimeout)
+}
+
+func validateMetric(t *testing.T, reporter source.StatsReporter, want int) {
+	if mockReporter, ok := reporter.(*mockReporter); !ok {
+		t.Errorf("reporter is not a mockReporter")
+	} else if mockReporter.eventCount != want {
+		t.Errorf("Expected %d for metric, got %d", want, mockReporter.eventCount)
+	}
+}
+
+func validateSent(t *testing.T, ce *kncetesting.TestCloudEventsClient, wantData string) {
+	if got := len(ce.Sent()); got != 1 {
+		t.Errorf("Expected 1 event to be sent, got %d", got)
+	}
+
+	if got := ce.Sent()[0].Data; string(got.([]byte)) != wantData {
+		t.Errorf("Expected %q event to be sent, got %q", wantData, string(got.([]byte)))
+	}
 }

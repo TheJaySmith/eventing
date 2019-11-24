@@ -20,9 +20,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/knative/eventing/pkg/apis/eventing/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	eventingduckv1alpha1 "knative.dev/eventing/pkg/apis/duck/v1alpha1"
+	"knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	"knative.dev/pkg/apis"
 )
 
 // BrokerOption enables further configuration of a Broker.
@@ -53,11 +55,11 @@ func WithBrokerDeletionTimestamp(b *v1alpha1.Broker) {
 	b.ObjectMeta.SetDeletionTimestamp(&t)
 }
 
-// WithBrokerChannelProvisioner sets the Broker's ChannelTemplate provisioner.
-func WithBrokerChannelProvisioner(provisioner *corev1.ObjectReference) BrokerOption {
+// WithBrokerChannel sets the Broker's ChannelTemplateSpec to the specified CRD.
+func WithBrokerChannel(crdType metav1.TypeMeta) BrokerOption {
 	return func(b *v1alpha1.Broker) {
-		b.Spec.ChannelTemplate = &v1alpha1.ChannelSpec{
-			Provisioner: provisioner,
+		b.Spec.ChannelTemplate = &eventingduckv1alpha1.ChannelTemplateSpec{
+			TypeMeta: crdType,
 		}
 	}
 }
@@ -65,7 +67,10 @@ func WithBrokerChannelProvisioner(provisioner *corev1.ObjectReference) BrokerOpt
 // WithBrokerAddress sets the Broker's address.
 func WithBrokerAddress(address string) BrokerOption {
 	return func(b *v1alpha1.Broker) {
-		b.Status.SetAddress(address)
+		b.Status.SetAddress(&apis.URL{
+			Scheme: "http",
+			Host:   address,
+		})
 	}
 }
 
@@ -130,5 +135,17 @@ func WithBrokerIngressChannelReady() BrokerOption {
 func WithBrokerIngressSubscriptionFailed(reason, msg string) BrokerOption {
 	return func(b *v1alpha1.Broker) {
 		b.Status.MarkIngressSubscriptionFailed(reason, msg)
+	}
+}
+
+func WithBrokerTriggerChannel(c *corev1.ObjectReference) BrokerOption {
+	return func(b *v1alpha1.Broker) {
+		b.Status.TriggerChannel = c
+	}
+}
+
+func WithBrokerIngressChannel(c *corev1.ObjectReference) BrokerOption {
+	return func(b *v1alpha1.Broker) {
+		b.Status.IngressChannel = c
 	}
 }

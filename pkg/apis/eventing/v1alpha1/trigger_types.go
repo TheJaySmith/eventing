@@ -17,18 +17,28 @@
 package v1alpha1
 
 import (
-	"github.com/knative/pkg/apis"
-	duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
-	"github.com/knative/pkg/kmeta"
-	"github.com/knative/pkg/webhook"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"knative.dev/pkg/apis"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
+	"knative.dev/pkg/kmeta"
+)
+
+const (
+	// DependencyAnnotation is the annotation key used to mark the sources that the Trigger depends on.
+	// This will be used when the kn client creates an importer and trigger pair for the user such that the trigger only receives events produced by the paired importer.
+	DependencyAnnotation = "knative.dev/dependency"
+	// InjectionAnnotation is the annotation key used to enable knative eventing injection for a namespace and automatically create a default broker.
+	// This will be used when the client creates a trigger paired with default broker and the default broker doesn't exist in the namespace
+	InjectionAnnotation = "knative-eventing-injection"
 )
 
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
+// Trigger represents a request to have events delivered to a consumer from a
+// Broker's event pool.
 type Trigger struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional
@@ -45,11 +55,13 @@ type Trigger struct {
 
 var (
 	// Check that Trigger can be validated, can be defaulted, and has immutable fields.
-	_ apis.Validatable   = (*Trigger)(nil)
-	_ apis.Defaultable   = (*Trigger)(nil)
-	_ apis.Immutable     = (*Trigger)(nil)
-	_ runtime.Object     = (*Trigger)(nil)
-	_ webhook.GenericCRD = (*Trigger)(nil)
+	_ apis.Validatable = (*Trigger)(nil)
+	_ apis.Defaultable = (*Trigger)(nil)
+
+	// Check that Trigger can return its spec untyped.
+	_ apis.HasSpec = (*Trigger)(nil)
+
+	_ runtime.Object = (*Trigger)(nil)
 
 	// Check that we can create OwnerReferences to a Trigger.
 	_ kmeta.OwnerRefable = (*Trigger)(nil)
@@ -68,27 +80,47 @@ type TriggerSpec struct {
 
 	// Subscriber is the addressable that receives events from the Broker that pass the Filter. It
 	// is required.
-	Subscriber *SubscriberSpec `json:"subscriber,omitempty"`
+	Subscriber *duckv1.Destination `json:"subscriber,omitempty"`
 }
 
 type TriggerFilter struct {
-	SourceAndType *TriggerFilterSourceAndType `json:"sourceAndType,omitempty"`
+	// DeprecatedSourceAndType filters events based on exact matches on the
+	// CloudEvents type and source attributes. This field has been replaced by the
+	// Attributes field.
+	//
+	// +optional
+	DeprecatedSourceAndType *TriggerFilterSourceAndType `json:"sourceAndType,omitempty"`
+
+	// Attributes filters events by exact match on event context attributes.
+	// Each key in the map is compared with the equivalent key in the event
+	// context. An event passes the filter if all values are equal to the
+	// specified values.
+	//
+	// Nested context attributes are not supported as keys. Only string values are supported.
+	//
+	// +optional
+	Attributes *TriggerFilterAttributes `json:"attributes,omitempty"`
 }
 
 // TriggerFilterSourceAndType filters events based on exact matches on the cloud event's type and
 // source attributes. Only exact matches will pass the filter. Either or both type and source can
-// use the value 'Any' to indicate all strings match.
+// use the value '' to indicate all strings match.
 type TriggerFilterSourceAndType struct {
 	Type   string `json:"type,omitempty"`
 	Source string `json:"source,omitempty"`
 }
 
+// TriggerFilterAttributes is a map of context attribute names to values for
+// filtering by equality. Only exact matches will pass the filter. You can use the value ''
+// to indicate all strings match.
+type TriggerFilterAttributes map[string]string
+
 // TriggerStatus represents the current state of a Trigger.
 type TriggerStatus struct {
-	// inherits duck/v1alpha1 Status, which currently provides:
+	// inherits duck/v1 Status, which currently provides:
 	// * ObservedGeneration - the 'Generation' of the Service that was last processed by the controller.
 	// * Conditions - the latest available observations of a resource's current state.
-	duckv1alpha1.Status `json:",inline"`
+	duckv1.Status `json:",inline"`
 
 	// SubscriberURI is the resolved URI of the receiver for this Trigger.
 	SubscriberURI string `json:"subscriberURI,omitempty"`
@@ -107,4 +139,9 @@ type TriggerList struct {
 // GetGroupVersionKind returns GroupVersionKind for Triggers
 func (t *Trigger) GetGroupVersionKind() schema.GroupVersionKind {
 	return SchemeGroupVersion.WithKind("Trigger")
+}
+
+// GetUntypedSpec returns the spec of the Trigger.
+func (t *Trigger) GetUntypedSpec() interface{} {
+	return t.Spec
 }

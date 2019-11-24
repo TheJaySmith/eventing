@@ -22,44 +22,44 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/knative/pkg/kmeta"
-
-	"github.com/knative/eventing/pkg/apis/eventing/v1alpha1"
-	eventinginformers "github.com/knative/eventing/pkg/client/informers/externalversions/eventing/v1alpha1"
-	eventinglisters "github.com/knative/eventing/pkg/client/listers/eventing/v1alpha1"
-	"github.com/knative/eventing/pkg/logging"
-	"github.com/knative/eventing/pkg/reconciler"
-	"github.com/knative/eventing/pkg/reconciler/broker/resources"
-	"github.com/knative/eventing/pkg/reconciler/names"
-	"github.com/knative/pkg/controller"
 	"go.uber.org/zap"
 	v1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	appsv1informers "k8s.io/client-go/informers/apps/v1"
-	corev1informers "k8s.io/client-go/informers/core/v1"
+	"k8s.io/client-go/dynamic"
 	appsv1listers "k8s.io/client-go/listers/apps/v1"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"knative.dev/pkg/apis"
+	duckapis "knative.dev/pkg/apis/duck"
+	"knative.dev/pkg/controller"
+
+	duckv1alpha1 "knative.dev/eventing/pkg/apis/duck/v1alpha1"
+	"knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	messagingv1alpha1 "knative.dev/eventing/pkg/apis/messaging/v1alpha1"
+	eventinglisters "knative.dev/eventing/pkg/client/listers/eventing/v1alpha1"
+	messaginglisters "knative.dev/eventing/pkg/client/listers/messaging/v1alpha1"
+	"knative.dev/eventing/pkg/duck"
+	"knative.dev/eventing/pkg/logging"
+	"knative.dev/eventing/pkg/reconciler"
+	"knative.dev/eventing/pkg/reconciler/broker/resources"
+	"knative.dev/eventing/pkg/reconciler/names"
 )
 
 const (
-	// ReconcilerName is the name of the reconciler
-	ReconcilerName = "Brokers"
-	// controllerAgentName is the string used by this controller to identify
-	// itself when creating events.
-	controllerAgentName = "broker-controller"
-
 	// Name of the corev1.Events emitted from the reconciliation process.
 	brokerReadinessChanged          = "BrokerReadinessChanged"
 	brokerReconcileError            = "BrokerReconcileError"
 	brokerUpdateStatusFailed        = "BrokerUpdateStatusFailed"
 	ingressSubscriptionDeleteFailed = "IngressSubscriptionDeleteFailed"
 	ingressSubscriptionCreateFailed = "IngressSubscriptionCreateFailed"
+	ingressSubscriptionGetFailed    = "IngressSubscriptionGetFailed"
 )
 
 type Reconciler struct {
@@ -67,10 +67,11 @@ type Reconciler struct {
 
 	// listers index properties about resources
 	brokerLister       eventinglisters.BrokerLister
-	channelLister      eventinglisters.ChannelLister
 	serviceLister      corev1listers.ServiceLister
 	deploymentLister   appsv1listers.DeploymentLister
-	subscriptionLister eventinglisters.SubscriptionLister
+	subscriptionLister messaginglisters.SubscriptionLister
+
+	channelableTracker duck.ListableTracker
 
 	ingressImage              string
 	ingressServiceAccountName string
@@ -87,54 +88,6 @@ type ReconcilerArgs struct {
 	IngressServiceAccountName string
 	FilterImage               string
 	FilterServiceAccountName  string
-}
-
-// NewController initializes the controller and is called by the generated code
-// Registers event handlers to enqueue events
-func NewController(
-	opt reconciler.Options,
-	brokerInformer eventinginformers.BrokerInformer,
-	subscriptionInformer eventinginformers.SubscriptionInformer,
-	channelInformer eventinginformers.ChannelInformer,
-	serviceInformer corev1informers.ServiceInformer,
-	deploymentInformer appsv1informers.DeploymentInformer,
-	args ReconcilerArgs,
-) *controller.Impl {
-
-	r := &Reconciler{
-		Base:                      reconciler.NewBase(opt, controllerAgentName),
-		brokerLister:              brokerInformer.Lister(),
-		channelLister:             channelInformer.Lister(),
-		serviceLister:             serviceInformer.Lister(),
-		deploymentLister:          deploymentInformer.Lister(),
-		subscriptionLister:        subscriptionInformer.Lister(),
-		ingressImage:              args.IngressImage,
-		ingressServiceAccountName: args.IngressServiceAccountName,
-		filterImage:               args.FilterImage,
-		filterServiceAccountName:  args.FilterServiceAccountName,
-	}
-	impl := controller.NewImpl(r, r.Logger, ReconcilerName, reconciler.MustNewStatsReporter(ReconcilerName, r.Logger))
-
-	r.Logger.Info("Setting up event handlers")
-
-	brokerInformer.Informer().AddEventHandler(reconciler.Handler(impl.Enqueue))
-
-	channelInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-		FilterFunc: controller.Filter(v1alpha1.SchemeGroupVersion.WithKind("Broker")),
-		Handler:    reconciler.Handler(impl.EnqueueControllerOf),
-	})
-
-	serviceInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-		FilterFunc: controller.Filter(v1alpha1.SchemeGroupVersion.WithKind("Broker")),
-		Handler:    reconciler.Handler(impl.EnqueueControllerOf),
-	})
-
-	deploymentInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-		FilterFunc: controller.Filter(v1alpha1.SchemeGroupVersion.WithKind("Broker")),
-		Handler:    reconciler.Handler(impl.EnqueueControllerOf),
-	})
-
-	return impl
 }
 
 // Reconcile compares the actual state with the desired, and attempts to
@@ -182,6 +135,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 }
 
 func (r *Reconciler) reconcile(ctx context.Context, b *v1alpha1.Broker) error {
+	logging.FromContext(ctx).Debug("Reconciling", zap.Any("Broker", b))
 	b.Status.InitializeConditions()
 
 	// 1. Trigger Channel is created for all events. Triggers will Subscribe to this Channel.
@@ -200,18 +154,52 @@ func (r *Reconciler) reconcile(ctx context.Context, b *v1alpha1.Broker) error {
 		return nil
 	}
 
-	triggerChan, err := r.reconcileTriggerChannel(ctx, b)
+	if b.Spec.ChannelTemplate == nil {
+		r.Logger.Error("Broker.Spec.ChannelTemplate is nil",
+			zap.String("namespace", b.Namespace), zap.String("name", b.Name))
+		return nil
+	}
+
+	gvr, _ := meta.UnsafeGuessKindToResource(b.Spec.ChannelTemplate.GetObjectKind().GroupVersionKind())
+	channelResourceInterface := r.DynamicClientSet.Resource(gvr).Namespace(b.Namespace)
+	if channelResourceInterface == nil {
+		return fmt.Errorf("unable to create dynamic client for: %+v", b.Spec.ChannelTemplate)
+	}
+
+	track := r.channelableTracker.TrackInNamespace(b)
+
+	triggerChannelName := resources.BrokerChannelName(b.Name, "trigger")
+	triggerChannelObjRef := corev1.ObjectReference{
+		Kind:       b.Spec.ChannelTemplate.Kind,
+		APIVersion: b.Spec.ChannelTemplate.APIVersion,
+		Name:       triggerChannelName,
+		Namespace:  b.Namespace,
+	}
+	// Start tracking the trigger channel.
+	if err := track(triggerChannelObjRef); err != nil {
+		return fmt.Errorf("unable to track changes to the trigger Channel: %v", err)
+	}
+
+	logging.FromContext(ctx).Info("Reconciling the trigger channel")
+	triggerChan, err := r.reconcileTriggerChannel(ctx, channelResourceInterface, triggerChannelObjRef, b)
 	if err != nil {
 		logging.FromContext(ctx).Error("Problem reconciling the trigger channel", zap.Error(err))
 		b.Status.MarkTriggerChannelFailed("ChannelFailure", "%v", err)
 		return err
-	} else if triggerChan.Status.Address.Hostname == "" {
-		// We check the trigger Channel's address here because it is needed to create the Ingress
-		// Deployment.
+	}
+
+	if triggerChan.Status.Address == nil {
 		logging.FromContext(ctx).Debug("Trigger Channel does not have an address", zap.Any("triggerChan", triggerChan))
 		b.Status.MarkTriggerChannelFailed("NoAddress", "Channel does not have an address.")
 		return nil
 	}
+	if url := triggerChan.Status.Address.GetURL(); url.Host == "" {
+		// We check the trigger Channel's address here because it is needed to create the Ingress Deployment.
+		logging.FromContext(ctx).Debug("Trigger Channel does not have an address", zap.Any("triggerChan", triggerChan))
+		b.Status.MarkTriggerChannelFailed("NoAddress", "Channel does not have an address.")
+		return nil
+	}
+	b.Status.TriggerChannel = &triggerChannelObjRef
 	b.Status.PropagateTriggerChannelReadiness(&triggerChan.Status)
 
 	filterDeployment, err := r.reconcileFilterDeployment(ctx, b)
@@ -242,14 +230,31 @@ func (r *Reconciler) reconcile(ctx context.Context, b *v1alpha1.Broker) error {
 		return err
 	}
 	b.Status.PropagateIngressDeploymentAvailability(ingressDeployment)
-	b.Status.SetAddress(names.ServiceHostName(svc.Name, svc.Namespace))
+	b.Status.SetAddress(&apis.URL{
+		Scheme: "http",
+		Host:   names.ServiceHostName(svc.Name, svc.Namespace),
+	})
 
-	ingressChan, err := r.reconcileIngressChannel(ctx, b)
+	ingressChannelName := resources.BrokerChannelName(b.Name, "ingress")
+	ingressChannelObjRef := corev1.ObjectReference{
+		Kind:       b.Spec.ChannelTemplate.Kind,
+		APIVersion: b.Spec.ChannelTemplate.APIVersion,
+		Name:       ingressChannelName,
+		Namespace:  b.Namespace,
+	}
+
+	// Start tracking the ingress channel.
+	if err = track(ingressChannelObjRef); err != nil {
+		return fmt.Errorf("unable to track changes to the ingress Channel: %v", err)
+	}
+
+	ingressChan, err := r.reconcileIngressChannel(ctx, channelResourceInterface, ingressChannelObjRef, b)
 	if err != nil {
 		logging.FromContext(ctx).Error("Problem reconciling the ingress channel", zap.Error(err))
 		b.Status.MarkIngressChannelFailed("ChannelFailure", "%v", err)
 		return err
 	}
+	b.Status.IngressChannel = &ingressChannelObjRef
 	b.Status.PropagateIngressChannelReadiness(&ingressChan.Status)
 
 	ingressSub, err := r.reconcileIngressSubscription(ctx, b, ingressChan, svc)
@@ -309,80 +314,68 @@ func (r *Reconciler) reconcileFilterService(ctx context.Context, b *v1alpha1.Bro
 	return r.reconcileService(ctx, expected)
 }
 
-func (r *Reconciler) reconcileTriggerChannel(ctx context.Context, b *v1alpha1.Broker) (*v1alpha1.Channel, error) {
-	get := func() (*v1alpha1.Channel, error) {
-		return r.getChannel(ctx, b, labels.SelectorFromSet(TriggerChannelLabels(b.Name)))
-	}
-	return r.reconcileChannel(ctx, get, newTriggerChannel(b))
+func newTriggerChannel(b *v1alpha1.Broker) (*unstructured.Unstructured, error) {
+	return resources.NewChannel("trigger", b, TriggerChannelLabels(b.Name))
 }
 
-func (r *Reconciler) reconcileIngressChannel(ctx context.Context, b *v1alpha1.Broker) (*v1alpha1.Channel, error) {
-	get := func() (*v1alpha1.Channel, error) {
-		return r.getChannel(ctx, b, labels.SelectorFromSet(IngressChannelLabels(b.Name)))
-	}
-	return r.reconcileChannel(ctx, get, newIngressChannel(b))
+func newIngressChannel(b *v1alpha1.Broker) (*unstructured.Unstructured, error) {
+	return resources.NewChannel("ingress", b, IngressChannelLabels(b.Name))
 }
 
-// reconcileChannel reconciles Broker's 'b' underlying channel.
-func (r *Reconciler) reconcileChannel(ctx context.Context, get func() (*v1alpha1.Channel, error), newChan *v1alpha1.Channel) (*v1alpha1.Channel, error) {
-	c, err := get()
-	// If the resource doesn't exist, we'll create it
-	if apierrs.IsNotFound(err) {
-		c, err = r.EventingClientSet.EventingV1alpha1().Channels(newChan.Namespace).Create(newChan)
-		if err != nil {
-			return nil, err
-		}
-		return c, nil
-	} else if err != nil {
+func (r *Reconciler) reconcileTriggerChannel(ctx context.Context, channelResourceInterface dynamic.ResourceInterface, channelObjRef corev1.ObjectReference, b *v1alpha1.Broker) (*duckv1alpha1.Channelable, error) {
+	c, err := newTriggerChannel(b)
+	if err != nil {
+		logging.FromContext(ctx).Error(fmt.Sprintf("Failed to create Trigger Channel object: %s/%s", channelObjRef.Namespace, channelObjRef.Name), zap.Error(err))
 		return nil, err
 	}
-
-	// TODO Determine if we want to update spec (maybe just args?). For now, do not update it.
-
-	return c, nil
+	return r.reconcileChannel(ctx, channelResourceInterface, channelObjRef, c, b)
 }
 
-// getChannel returns the Channel object for Broker 'b' if exists, otherwise it returns an error.
-func (r *Reconciler) getChannel(ctx context.Context, b *v1alpha1.Broker, ls labels.Selector) (*v1alpha1.Channel, error) {
-	channels, err := r.channelLister.Channels(b.Namespace).List(ls)
+func (r *Reconciler) reconcileIngressChannel(ctx context.Context, channelResourceInterface dynamic.ResourceInterface, channelObjRef corev1.ObjectReference, b *v1alpha1.Broker) (*duckv1alpha1.Channelable, error) {
+	c, err := newIngressChannel(b)
 	if err != nil {
 		return nil, err
 	}
-	for _, c := range channels {
-		if metav1.IsControlledBy(c, b) {
-			return c, nil
+	return r.reconcileChannel(ctx, channelResourceInterface, channelObjRef, c, b)
+}
+
+// reconcileChannel reconciles Broker's 'b' underlying channel.
+func (r *Reconciler) reconcileChannel(ctx context.Context, channelResourceInterface dynamic.ResourceInterface, channelObjRef corev1.ObjectReference, newChannel *unstructured.Unstructured, b *v1alpha1.Broker) (*duckv1alpha1.Channelable, error) {
+	lister, err := r.channelableTracker.ListerFor(channelObjRef)
+	if err != nil {
+		logging.FromContext(ctx).Error(fmt.Sprintf("Error getting lister for Channel: %s/%s", channelObjRef.Namespace, channelObjRef.Name), zap.Error(err))
+		return nil, err
+	}
+	c, err := lister.ByNamespace(channelObjRef.Namespace).Get(channelObjRef.Name)
+	// If the resource doesn't exist, we'll create it
+	if err != nil {
+		if apierrs.IsNotFound(err) {
+			logging.FromContext(ctx).Debug(fmt.Sprintf("Creating Channel Object: %+v", newChannel))
+			created, err := channelResourceInterface.Create(newChannel, metav1.CreateOptions{})
+			if err != nil {
+				logging.FromContext(ctx).Error(fmt.Sprintf("Failed to create Channel: %s/%s", channelObjRef.Namespace, channelObjRef.Name), zap.Error(err))
+				return nil, err
+			}
+			logging.FromContext(ctx).Info(fmt.Sprintf("Created Channel: %s/%s", channelObjRef.Namespace, channelObjRef.Name), zap.Any("NewChannel", newChannel))
+			channelable := &duckv1alpha1.Channelable{}
+			err = duckapis.FromUnstructured(created, channelable)
+			if err != nil {
+				logging.FromContext(ctx).Error(fmt.Sprintf("Failed to convert to Channelable Object: %s/%s", channelObjRef.Namespace, channelObjRef.Name), zap.Any("createdChannel", created), zap.Error(err))
+				return nil, err
+
+			}
+			return channelable, nil
 		}
+		logging.FromContext(ctx).Error(fmt.Sprintf("Failed to get Channel: %s/%s", channelObjRef.Namespace, channelObjRef.Name), zap.Error(err))
+		return nil, err
 	}
-
-	return nil, apierrs.NewNotFound(schema.GroupResource{}, "")
-}
-
-func newTriggerChannel(b *v1alpha1.Broker) *v1alpha1.Channel {
-	return newChannel(b, TriggerChannelLabels(b.Name))
-}
-
-func newIngressChannel(b *v1alpha1.Broker) *v1alpha1.Channel {
-	return newChannel(b, IngressChannelLabels(b.Name))
-}
-
-// newChannel creates a new Channel for Broker 'b'.
-func newChannel(b *v1alpha1.Broker, l map[string]string) *v1alpha1.Channel {
-	var spec v1alpha1.ChannelSpec
-	if b.Spec.ChannelTemplate != nil {
-		spec = *b.Spec.ChannelTemplate
+	logging.FromContext(ctx).Debug(fmt.Sprintf("Found Channel: %s/%s", channelObjRef.Namespace, channelObjRef.Name))
+	channelable, ok := c.(*duckv1alpha1.Channelable)
+	if !ok {
+		logging.FromContext(ctx).Error(fmt.Sprintf("Failed to convert to Channelable Object: %s/%s", channelObjRef.Namespace, channelObjRef.Name), zap.Error(err))
+		return nil, err
 	}
-
-	return &v1alpha1.Channel{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:    b.Namespace,
-			GenerateName: fmt.Sprintf("%s-broker-", b.Name),
-			Labels:       l,
-			OwnerReferences: []metav1.OwnerReference{
-				*kmeta.NewControllerRef(b),
-			},
-		},
-		Spec: spec,
-	}
+	return channelable, nil
 }
 
 // TriggerChannelLabels are all the labels placed on the Trigger Channel for the given brokerName. This
@@ -456,13 +449,13 @@ func (r *Reconciler) reconcileService(ctx context.Context, svc *corev1.Service) 
 	return current, nil
 }
 
-// reconcileIngressDeployment reconciles the Ingress Deployment.
-func (r *Reconciler) reconcileIngressDeployment(ctx context.Context, b *v1alpha1.Broker, c *v1alpha1.Channel) (*v1.Deployment, error) {
+// reconcileIngressDeploymentCRD reconciles the Ingress Deployment for a CRD backed channel.
+func (r *Reconciler) reconcileIngressDeployment(ctx context.Context, b *v1alpha1.Broker, c *duckv1alpha1.Channelable) (*v1.Deployment, error) {
 	expected := resources.MakeIngress(&resources.IngressArgs{
 		Broker:             b,
 		Image:              r.ingressImage,
 		ServiceAccountName: r.ingressServiceAccountName,
-		ChannelAddress:     c.Status.Address.Hostname,
+		ChannelAddress:     c.Status.Address.GetURL().Host,
 	})
 	return r.reconcileDeployment(ctx, expected)
 }
@@ -473,45 +466,58 @@ func (r *Reconciler) reconcileIngressService(ctx context.Context, b *v1alpha1.Br
 	return r.reconcileService(ctx, expected)
 }
 
-func (r *Reconciler) reconcileIngressSubscription(ctx context.Context, b *v1alpha1.Broker, c *v1alpha1.Channel, svc *corev1.Service) (*v1alpha1.Subscription, error) {
-	expected := makeSubscription(b, c, svc)
+func (r *Reconciler) reconcileIngressSubscription(ctx context.Context, b *v1alpha1.Broker, c *duckv1alpha1.Channelable, svc *corev1.Service) (*messagingv1alpha1.Subscription, error) {
+	expected := resources.MakeSubscription(b, c, svc)
 
-	sub, err := r.getIngressSubscription(ctx, b)
+	sub, err := r.subscriptionLister.Subscriptions(b.Namespace).Get(expected.Name)
 	// If the resource doesn't exist, we'll create it
 	if apierrs.IsNotFound(err) {
-		sub, err = r.EventingClientSet.EventingV1alpha1().Subscriptions(expected.Namespace).Create(expected)
+		logging.FromContext(ctx).Info("Creating subscription")
+		sub, err = r.EventingClientSet.MessagingV1alpha1().Subscriptions(expected.Namespace).Create(expected)
 		if err != nil {
+			r.Recorder.Eventf(b, corev1.EventTypeWarning, ingressSubscriptionCreateFailed, "Broker's subscription create failed: %v", err)
 			return nil, err
 		}
 		return sub, nil
 	} else if err != nil {
+		logging.FromContext(ctx).Error("Failed to get subscription", zap.Error(err))
+		r.Recorder.Eventf(b, corev1.EventTypeWarning, ingressSubscriptionGetFailed, "Getting the Broker's Subscription failed: %v", err)
 		return nil, err
-	}
-
-	// Update Subscription if it has changed. Ignore the generation.
-	expected.Spec.DeprecatedGeneration = sub.Spec.DeprecatedGeneration
-	if !equality.Semantic.DeepDerivative(expected.Spec, sub.Spec) {
-		// Given that spec.channel is immutable, we cannot just update the subscription. We delete
-		// it instead, and re-create it.
-		err = r.EventingClientSet.EventingV1alpha1().Subscriptions(sub.Namespace).Delete(sub.Name, &metav1.DeleteOptions{})
-		if err != nil {
-			logging.FromContext(ctx).Info("Cannot delete subscription", zap.Error(err))
-			r.Recorder.Eventf(b, corev1.EventTypeWarning, ingressSubscriptionDeleteFailed, "Delete Broker Ingress' subscription failed: %v", err)
-			return nil, err
-		}
-		sub, err = r.EventingClientSet.EventingV1alpha1().Subscriptions(expected.Namespace).Create(expected)
-		if err != nil {
-			logging.FromContext(ctx).Info("Cannot create subscription", zap.Error(err))
-			r.Recorder.Eventf(b, corev1.EventTypeWarning, ingressSubscriptionCreateFailed, "Create Broker Ingress' subscription failed: %v", err)
-			return nil, err
-		}
+	} else if !metav1.IsControlledBy(sub, b) {
+		b.Status.MarkIngressSubscriptionNotOwned(sub)
+		return nil, fmt.Errorf("broker %q does not own subscription %q", b.Name, sub.Name)
+	} else if sub, err = r.reconcileExistingIngressSubscription(ctx, b, expected, sub); err != nil {
+		return nil, err
 	}
 	return sub, nil
 }
 
-// getSubscription returns the subscription of trigger 't' if exists,
+func (r *Reconciler) reconcileExistingIngressSubscription(ctx context.Context, b *v1alpha1.Broker, expected, actual *messagingv1alpha1.Subscription) (*messagingv1alpha1.Subscription, error) {
+	// Update Subscription if it has changed. Ignore the generation.
+	expected.Spec.DeprecatedGeneration = actual.Spec.DeprecatedGeneration
+	if equality.Semantic.DeepDerivative(expected.Spec, actual.Spec) {
+		return actual, nil
+	}
+	// Given that spec.channel is immutable, we cannot just update the subscription. We delete
+	// it instead, and re-create it.
+	err := r.EventingClientSet.MessagingV1alpha1().Subscriptions(b.Namespace).Delete(actual.Name, &metav1.DeleteOptions{})
+	if err != nil {
+		logging.FromContext(ctx).Info("Cannot delete subscription", zap.Error(err))
+		r.Recorder.Eventf(b, corev1.EventTypeWarning, ingressSubscriptionDeleteFailed, "Delete Broker Ingress' subscription failed: %v", err)
+		return nil, err
+	}
+	newSub, err := r.EventingClientSet.MessagingV1alpha1().Subscriptions(b.Namespace).Create(expected)
+	if err != nil {
+		logging.FromContext(ctx).Info("Cannot create subscription", zap.Error(err))
+		r.Recorder.Eventf(b, corev1.EventTypeWarning, ingressSubscriptionCreateFailed, "Create Broker Ingress' subscription failed: %v", err)
+		return nil, err
+	}
+	return newSub, nil
+}
+
+// getSubscription returns the first subscription controlled by Broker b
 // otherwise it returns an error.
-func (r *Reconciler) getIngressSubscription(ctx context.Context, b *v1alpha1.Broker) (*v1alpha1.Subscription, error) {
+func (r *Reconciler) getIngressSubscription(ctx context.Context, b *v1alpha1.Broker) (*messagingv1alpha1.Subscription, error) {
 	subscriptions, err := r.subscriptionLister.Subscriptions(b.Namespace).List(labels.SelectorFromSet(ingressSubscriptionLabels(b.Name)))
 	if err != nil {
 		return nil, err
@@ -523,34 +529,6 @@ func (r *Reconciler) getIngressSubscription(ctx context.Context, b *v1alpha1.Bro
 	}
 
 	return nil, apierrs.NewNotFound(schema.GroupResource{}, "")
-}
-
-// makeSubscription returns a placeholder subscription for trigger 't', channel 'c', and service 'svc'.
-func makeSubscription(b *v1alpha1.Broker, c *v1alpha1.Channel, svc *corev1.Service) *v1alpha1.Subscription {
-	return &v1alpha1.Subscription{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:    b.Namespace,
-			GenerateName: fmt.Sprintf("internal-ingress-%s-", b.Name),
-			OwnerReferences: []metav1.OwnerReference{
-				*kmeta.NewControllerRef(b),
-			},
-			Labels: ingressSubscriptionLabels(b.Name),
-		},
-		Spec: v1alpha1.SubscriptionSpec{
-			Channel: corev1.ObjectReference{
-				APIVersion: v1alpha1.SchemeGroupVersion.String(),
-				Kind:       "Channel",
-				Name:       c.Name,
-			},
-			Subscriber: &v1alpha1.SubscriberSpec{
-				Ref: &corev1.ObjectReference{
-					APIVersion: "v1",
-					Kind:       "Service",
-					Name:       svc.Name,
-				},
-			},
-		},
-	}
 }
 
 func ingressSubscriptionLabels(brokerName string) map[string]string {

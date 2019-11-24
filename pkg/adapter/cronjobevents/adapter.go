@@ -19,27 +19,37 @@ package cronjobevents
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	cloudevents "github.com/cloudevents/sdk-go"
-	sourcesv1alpha1 "github.com/knative/eventing/pkg/apis/sources/v1alpha1"
-	"github.com/knative/eventing/pkg/kncloudevents"
-	"github.com/knative/pkg/logging"
 	"github.com/robfig/cron"
 	"go.uber.org/zap"
+	"knative.dev/eventing/pkg/adapter"
+	sourcesv1alpha1 "knative.dev/eventing/pkg/apis/sources/v1alpha1"
+	"knative.dev/pkg/logging"
+	"knative.dev/pkg/source"
 )
 
-// TODO: this should be a k8s cron.
+type envConfig struct {
+	adapter.EnvConfig
 
-// Adapter implements the Cron Job adapter to trigger a Sink.
-type Adapter struct {
+	// Environment variable container schedule.
+	Schedule string `envconfig:"SCHEDULE" required:"true"`
+
+	// Environment variable containing data.
+	Data string `envconfig:"DATA" required:"true"`
+
+	// Environment variable containing the name of the cron job.
+	Name string `envconfig:"NAME" required:"true"`
+}
+
+// cronJobAdapter implements the Cron Job adapter to trigger a Sink.
+type cronJobAdapter struct {
 	// Schedule is a cron format string such as 0 * * * * or @hourly
 	Schedule string
 
 	// Data is the data to be posted to the target.
 	Data string
-
-	// SinkURI is the URI messages will be forwarded on to.
-	SinkURI string
 
 	// Name is the name of the Cron Job.
 	Name string
@@ -48,32 +58,36 @@ type Adapter struct {
 	Namespace string
 
 	// client sends cloudevents.
-	client cloudevents.Client
+	Client cloudevents.Client
+
+	Reporter source.StatsReporter
 }
 
-// Initialize cloudevent client
-func (a *Adapter) initClient() error {
-	if a.client == nil {
-		var err error
-		if a.client, err = kncloudevents.NewDefaultClient(a.SinkURI); err != nil {
-			return err
-		}
+const (
+	resourceGroup = "cronjobsources.sources.eventing.knative.dev"
+)
+
+func NewEnvConfig() adapter.EnvConfigAccessor {
+	return &envConfig{}
+}
+
+func NewAdapter(ctx context.Context, processed adapter.EnvConfigAccessor, ceClient cloudevents.Client, reporter source.StatsReporter) adapter.Adapter {
+	env := processed.(*envConfig)
+
+	return &cronJobAdapter{
+		Schedule:  env.Schedule,
+		Data:      env.Data,
+		Name:      env.Name,
+		Namespace: env.Namespace,
+		Reporter:  reporter,
+		Client:    ceClient,
 	}
-	return nil
 }
 
-func (a *Adapter) Start(ctx context.Context, stopCh <-chan struct{}) error {
-	logger := logging.FromContext(ctx)
-
+func (a *cronJobAdapter) Start(stopCh <-chan struct{}) error {
 	sched, err := cron.ParseStandard(a.Schedule)
 	if err != nil {
-		logger.Error("Unparseable schedule: ", a.Schedule, zap.Error(err))
-		return err
-	}
-
-	if err = a.initClient(); err != nil {
-		logger.Error("Failed to create cloudevent client", zap.Error(err))
-		return err
+		return fmt.Errorf("Unparseable schedule %s: %v", a.Schedule, err)
 	}
 
 	c := cron.New()
@@ -81,21 +95,31 @@ func (a *Adapter) Start(ctx context.Context, stopCh <-chan struct{}) error {
 	c.Start()
 	<-stopCh
 	c.Stop()
-	logger.Info("Shutting down.")
 	return nil
 }
 
-func (a *Adapter) cronTick() {
+func (a *cronJobAdapter) cronTick() {
 	logger := logging.FromContext(context.TODO())
 
-	event := cloudevents.NewEvent(cloudevents.VersionV02)
+	event := cloudevents.NewEvent(cloudevents.VersionV03)
 	event.SetType(sourcesv1alpha1.CronJobEventType)
 	event.SetSource(sourcesv1alpha1.CronJobEventSource(a.Namespace, a.Name))
 	event.SetData(message(a.Data))
-
-	if _, err := a.client.Send(context.TODO(), event); err != nil {
-		logger.Error("failed to send cloudevent", err)
+	event.SetDataContentType(cloudevents.ApplicationJSON)
+	reportArgs := &source.ReportArgs{
+		Namespace:     a.Namespace,
+		EventSource:   event.Source(),
+		EventType:     event.Type(),
+		Name:          a.Name,
+		ResourceGroup: resourceGroup,
 	}
+
+	rctx, _, err := a.Client.Send(context.TODO(), event)
+	rtctx := cloudevents.HTTPTransportContextFrom(rctx)
+	if err != nil {
+		logger.Error("failed to send cloudevent", zap.Error(err))
+	}
+	a.Reporter.ReportEventCount(reportArgs, rtctx.StatusCode)
 }
 
 type Message struct {

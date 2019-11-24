@@ -21,13 +21,13 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/knative/pkg/apis"
-	"github.com/knative/pkg/webhook"
+	"knative.dev/pkg/apis"
+	"knative.dev/pkg/webhook/resourcesemantics"
 )
 
 type CRDTest struct {
 	name string
-	cr   webhook.GenericCRD
+	cr   resourcesemantics.GenericCRD
 	want *apis.FieldError
 }
 

@@ -17,33 +17,42 @@ limitations under the License.
 package v1alpha1
 
 import (
-	duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+
+	"knative.dev/pkg/apis"
+
+	"knative.dev/eventing/pkg/apis/duck"
 )
 
 const (
 	// CronJobConditionReady has status True when the CronJobSource is ready to send events.
-	CronJobConditionReady = duckv1alpha1.ConditionReady
+	CronJobConditionReady = apis.ConditionReady
 
 	// CronJobConditionValidSchedule has status True when the CronJobSource has been configured with a valid schedule.
-	CronJobConditionValidSchedule duckv1alpha1.ConditionType = "ValidSchedule"
+	CronJobConditionValidSchedule apis.ConditionType = "ValidSchedule"
 
 	// CronJobConditionSinkProvided has status True when the CronJobSource has been configured with a sink target.
-	CronJobConditionSinkProvided duckv1alpha1.ConditionType = "SinkProvided"
+	CronJobConditionSinkProvided apis.ConditionType = "SinkProvided"
 
 	// CronJobConditionDeployed has status True when the CronJobSource has had it's receive adapter deployment created.
-	CronJobConditionDeployed duckv1alpha1.ConditionType = "Deployed"
+	CronJobConditionDeployed apis.ConditionType = "Deployed"
 
 	// CronJobConditionEventTypeProvided has status True when the CronJobSource has been configured with its event type.
-	CronJobConditionEventTypeProvided duckv1alpha1.ConditionType = "EventTypeProvided"
+	CronJobConditionEventTypeProvided apis.ConditionType = "EventTypeProvided"
+
+	// CronJobConditionResources is True when the resources listed for the CronJobSource have been properly
+	// parsed and match specified syntax for resource quantities
+	CronJobConditionResources apis.ConditionType = "ResourcesCorrect"
 )
 
-var cronJobSourceCondSet = duckv1alpha1.NewLivingConditionSet(
+var cronJobSourceCondSet = apis.NewLivingConditionSet(
 	CronJobConditionValidSchedule,
 	CronJobConditionSinkProvided,
 	CronJobConditionDeployed)
 
 // GetCondition returns the condition currently associated with the given type, or nil.
-func (s *CronJobSourceStatus) GetCondition(t duckv1alpha1.ConditionType) *duckv1alpha1.Condition {
+func (s *CronJobSourceStatus) GetCondition(t apis.ConditionType) *apis.Condition {
 	return cronJobSourceCondSet.Manage(s).GetCondition(t)
 }
 
@@ -78,24 +87,37 @@ func (s *CronJobSourceStatus) MarkSink(uri string) {
 	}
 }
 
+// MarkSinkWarnDeprecated sets the condition that the source has a sink configured and warns ref is deprecated.
+func (s *CronJobSourceStatus) MarkSinkWarnRefDeprecated(uri string) {
+	s.SinkURI = uri
+	if len(uri) > 0 {
+		c := apis.Condition{
+			Type:     CronJobConditionSinkProvided,
+			Status:   corev1.ConditionTrue,
+			Severity: apis.ConditionSeverityError,
+			Message:  "Using deprecated object ref fields when specifying spec.sink. Update to spec.sink.ref. These will be removed in the future.",
+		}
+		apiserverCondSet.Manage(s).SetCondition(c)
+	} else {
+		apiserverCondSet.Manage(s).MarkUnknown(CronJobConditionSinkProvided, "SinkEmpty", "Sink has resolved to empty.%s", "")
+	}
+}
+
 // MarkNoSink sets the condition that the source does not have a sink configured.
 func (s *CronJobSourceStatus) MarkNoSink(reason, messageFormat string, messageA ...interface{}) {
 	cronJobSourceCondSet.Manage(s).MarkFalse(CronJobConditionSinkProvided, reason, messageFormat, messageA...)
 }
 
-// MarkDeployed sets the condition that the source has been deployed.
-func (s *CronJobSourceStatus) MarkDeployed() {
-	cronJobSourceCondSet.Manage(s).MarkTrue(CronJobConditionDeployed)
-}
-
-// MarkDeploying sets the condition that the source is deploying.
-func (s *CronJobSourceStatus) MarkDeploying(reason, messageFormat string, messageA ...interface{}) {
-	cronJobSourceCondSet.Manage(s).MarkUnknown(CronJobConditionDeployed, reason, messageFormat, messageA...)
-}
-
-// MarkNotDeployed sets the condition that the source has not been deployed.
-func (s *CronJobSourceStatus) MarkNotDeployed(reason, messageFormat string, messageA ...interface{}) {
-	cronJobSourceCondSet.Manage(s).MarkFalse(CronJobConditionDeployed, reason, messageFormat, messageA...)
+// PropagateDeploymentAvailability uses the availability of the provided Deployment to determine if
+// CronJobConditionDeployed should be marked as true or false.
+func (s *CronJobSourceStatus) PropagateDeploymentAvailability(d *appsv1.Deployment) {
+	if duck.DeploymentIsAvailable(&d.Status, false) {
+		cronJobSourceCondSet.Manage(s).MarkTrue(CronJobConditionDeployed)
+	} else {
+		// I don't know how to propagate the status well, so just give the name of the Deployment
+		// for now.
+		cronJobSourceCondSet.Manage(s).MarkFalse(CronJobConditionDeployed, "DeploymentUnavailable", "The Deployment '%s' is unavailable.", d.Name)
+	}
 }
 
 // MarkEventType sets the condition that the source has set its event type.
@@ -106,4 +128,14 @@ func (s *CronJobSourceStatus) MarkEventType() {
 // MarkNoEventType sets the condition that the source does not its event type configured.
 func (s *CronJobSourceStatus) MarkNoEventType(reason, messageFormat string, messageA ...interface{}) {
 	cronJobSourceCondSet.Manage(s).MarkFalse(CronJobConditionEventTypeProvided, reason, messageFormat, messageA...)
+}
+
+// MarkResourcesCorrect sets the condition that the source resources are properly parsable quantities
+func (s *CronJobSourceStatus) MarkResourcesCorrect() {
+	cronJobSourceCondSet.Manage(s).MarkTrue(CronJobConditionResources)
+}
+
+// MarkResourcesIncorrect sets the condition that the source resources are not properly parsable quantities
+func (s *CronJobSourceStatus) MarkResourcesIncorrect(reason, messageFormat string, messageA ...interface{}) {
+	cronJobSourceCondSet.Manage(s).MarkFalse(CronJobConditionResources, reason, messageFormat, messageA...)
 }

@@ -18,6 +18,13 @@ package v1alpha1
 
 import (
 	v1 "k8s.io/api/apps/v1"
+	"knative.dev/pkg/apis"
+	pkgduckv1alpha1 "knative.dev/pkg/apis/duck/v1alpha1"
+
+	duckv1alpha1 "knative.dev/eventing/pkg/apis/duck/v1alpha1"
+	messagingv1alpha1 "knative.dev/eventing/pkg/apis/messaging/v1alpha1"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
+	duckv1beta1 "knative.dev/pkg/apis/duck/v1beta1"
 )
 
 type testHelper struct{}
@@ -25,30 +32,37 @@ type testHelper struct{}
 // TestHelper contains helpers for unit tests.
 var TestHelper = testHelper{}
 
-func (testHelper) ReadyChannelStatus() *ChannelStatus {
-	cs := &ChannelStatus{}
-	cs.MarkProvisionerInstalled()
-	cs.MarkProvisioned()
-	cs.SetAddress("foo")
+func (testHelper) ReadyChannelStatus() *duckv1alpha1.ChannelableStatus {
+	cs := &duckv1alpha1.ChannelableStatus{
+		Status: duckv1.Status{},
+		AddressStatus: pkgduckv1alpha1.AddressStatus{
+			Address: &pkgduckv1alpha1.Addressable{
+				Addressable: duckv1beta1.Addressable{
+					URL: &apis.URL{Scheme: "http", Host: "foo"},
+				},
+				Hostname: "foo",
+			},
+		},
+		SubscribableTypeStatus: duckv1alpha1.SubscribableTypeStatus{}}
 	return cs
 }
 
-func (t testHelper) NotReadyChannelStatus() *ChannelStatus {
-	cs := t.ReadyChannelStatus()
-	cs.MarkNotProvisioned("foo", "bar")
-	return cs
+func (t testHelper) NotReadyChannelStatus() *duckv1alpha1.ChannelableStatus {
+	return &duckv1alpha1.ChannelableStatus{}
 }
 
-func (testHelper) ReadySubscriptionStatus() *SubscriptionStatus {
-	ss := &SubscriptionStatus{}
+func (testHelper) ReadySubscriptionStatus() *messagingv1alpha1.SubscriptionStatus {
+	ss := &messagingv1alpha1.SubscriptionStatus{}
 	ss.MarkChannelReady()
 	ss.MarkReferencesResolved()
+	ss.MarkAddedToChannel()
 	return ss
 }
 
-func (testHelper) NotReadySubscriptionStatus() *SubscriptionStatus {
-	ss := &SubscriptionStatus{}
+func (testHelper) NotReadySubscriptionStatus() *messagingv1alpha1.SubscriptionStatus {
+	ss := &messagingv1alpha1.SubscriptionStatus{}
 	ss.MarkReferencesResolved()
+	ss.MarkChannelNotReady("testInducedError", "test induced %s", "error")
 	return ss
 }
 
@@ -59,7 +73,13 @@ func (t testHelper) ReadyBrokerStatus() *BrokerStatus {
 	bs.PropagateTriggerChannelReadiness(t.ReadyChannelStatus())
 	bs.PropagateIngressSubscriptionReadiness(t.ReadySubscriptionStatus())
 	bs.PropagateFilterDeploymentAvailability(t.AvailableDeployment())
-	bs.SetAddress("foo")
+	bs.SetAddress(&apis.URL{Scheme: "http", Host: "foo"})
+	return bs
+}
+
+func (t testHelper) NotReadyBrokerStatus() *BrokerStatus {
+	bs := &BrokerStatus{}
+	bs.PropagateIngressChannelReadiness(&duckv1alpha1.ChannelableStatus{})
 	return bs
 }
 

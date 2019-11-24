@@ -26,23 +26,18 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	"github.com/knative/eventing/pkg/apis/eventing/v1alpha1"
-	eventingv1alpha1 "github.com/knative/eventing/pkg/apis/eventing/v1alpha1"
-	duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/scheme"
+
+	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	duckv1alpha1 "knative.dev/pkg/apis/duck/v1alpha1"
 )
 
 var (
 	uri = "http://example.com"
 
 	channelAddress = "test-channel.hostname"
-	channelURL     = fmt.Sprintf("http://%s/", channelAddress)
-
-	legacyCallableAddress = "legacy-callable.domain-internal"
-	legacyCallableURL     = fmt.Sprintf("http://%s/", legacyCallableAddress)
+	channelURL     = fmt.Sprintf("http://%s", channelAddress)
 )
 
 func init() {
@@ -60,7 +55,7 @@ func TestDomainToURL(t *testing.T) {
 }
 
 func TestResourceInterface_BadDynamicInterface(t *testing.T) {
-	actual, err := ResourceInterface(&badDynamicInterface{}, testNS, &corev1.ObjectReference{})
+	actual, err := ResourceInterface(&badDynamicInterface{}, testNS, schema.GroupVersionKind{})
 	if err.Error() != "failed to create dynamic client resource" {
 		t.Fatalf("Unexpected error '%v'", err)
 	}
@@ -86,115 +81,6 @@ func TestObjectReference_BadDynamicInterface(t *testing.T) {
 		t.Fatalf("Unexpected actual. Expected nil. Actual '%v'", actual)
 	}
 }
-
-func TestSubscriberSpec(t *testing.T) {
-	testCases := map[string]struct {
-		Sub         *v1alpha1.SubscriberSpec
-		Objects     []runtime.Object
-		Expected    string
-		ExpectedErr string
-	}{
-		"nil": {
-			Sub:      nil,
-			Expected: "",
-		},
-		"empty": {
-			Sub:      &v1alpha1.SubscriberSpec{},
-			Expected: "",
-		},
-		"DNS Name": {
-			Sub: &v1alpha1.SubscriberSpec{
-				DeprecatedDNSName: &uri,
-			},
-			Expected: uri,
-		},
-		"URI": {
-			Sub: &v1alpha1.SubscriberSpec{
-				URI: &uri,
-			},
-			Expected: uri,
-		},
-		"Doesn't exist": {
-			Sub: &v1alpha1.SubscriberSpec{
-				Ref: &corev1.ObjectReference{
-					APIVersion: "v1",
-					Kind:       "Service",
-					Name:       "doesnt-exist",
-				},
-			},
-			ExpectedErr: "services \"doesnt-exist\" not found",
-		},
-		"K8s Service": {
-			Sub: &v1alpha1.SubscriberSpec{
-				Ref: &corev1.ObjectReference{
-					APIVersion: "v1",
-					Kind:       "Service",
-					Name:       "does-exist",
-				},
-			},
-			Objects: []runtime.Object{
-				k8sService("does-exist"),
-			},
-			Expected: fmt.Sprintf("http://does-exist.%s.svc.cluster.local/", testNS),
-		},
-		"Addressable": {
-			Sub: &v1alpha1.SubscriberSpec{
-				Ref: &corev1.ObjectReference{
-					APIVersion: "eventing.knative.dev/v1alpha1",
-					Kind:       "Channel",
-					Name:       "does-exist",
-				},
-			},
-			Objects: []runtime.Object{
-				channel("does-exist"),
-			},
-			Expected: channelURL,
-		},
-		"Legacy Callable": {
-			Sub: &v1alpha1.SubscriberSpec{
-				Ref: &corev1.ObjectReference{
-					APIVersion: "eventing.knative.dev/v1alpha1",
-					Kind:       "LegacyCallable",
-					Name:       "does-exist",
-				},
-			},
-			Objects: []runtime.Object{
-				legacyCallable("does-exist"),
-			},
-			Expected: legacyCallableURL,
-		},
-		"Non-Addressable": {
-			Sub: &v1alpha1.SubscriberSpec{
-				Ref: &corev1.ObjectReference{
-					APIVersion: "v1",
-					Kind:       "ConfigMap",
-					Name:       "does-exist",
-				},
-			},
-			Objects: []runtime.Object{
-				configMap("does-exist"),
-			},
-			ExpectedErr: "status does not contain address",
-		},
-	}
-
-	for n, tc := range testCases {
-		t.Run(n, func(t *testing.T) {
-			dc := fake.NewSimpleDynamicClient(scheme.Scheme, tc.Objects...)
-
-			actual, err := SubscriberSpec(context.TODO(), dc, testNS, tc.Sub, func(corev1.ObjectReference) error { return nil })
-			if err != nil {
-				if tc.ExpectedErr == "" || tc.ExpectedErr != err.Error() {
-					t.Fatalf("Unexpected error. Expected '%s'. Actual '%s'.", tc.ExpectedErr, err.Error())
-				}
-			}
-			if tc.Expected != actual {
-				t.Fatalf("Unexpected URL. Expected '%s'. Actual '%s'", tc.Expected, actual)
-			}
-		})
-	}
-}
-
 func k8sService(name string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -221,22 +107,6 @@ func channel(name string) *unstructured.Unstructured {
 				"address": map[string]interface{}{
 					"hostname": channelAddress,
 				},
-			},
-		},
-	}
-}
-
-func legacyCallable(name string) *unstructured.Unstructured {
-	return &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": "eventing.knative.dev/v1alpha1",
-			"kind":       "LegacyCallable",
-			"metadata": map[string]interface{}{
-				"namespace": testNS,
-				"name":      name,
-			},
-			"status": map[string]interface{}{
-				"domainInternal": legacyCallableAddress,
 			},
 		},
 	}

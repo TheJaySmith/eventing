@@ -19,54 +19,53 @@ package tracing
 import (
 	"fmt"
 
-	"github.com/knative/pkg/configmap"
-	"github.com/knative/pkg/tracing"
-	tracingconfig "github.com/knative/pkg/tracing/config"
-	zipkin "github.com/openzipkin/zipkin-go"
 	"go.uber.org/zap"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	eventingconfigmap "knative.dev/eventing/pkg/configmap"
+	"knative.dev/pkg/configmap"
+	"knative.dev/pkg/tracing"
+	tracingconfig "knative.dev/pkg/tracing/config"
 )
 
 // TODO Move this to knative/pkg.
 
 var (
-	// DebugCfg is a configuration to use to record all traces.
-	DebugCfg = &tracingconfig.Config{
-		Enable:         true,
-		Debug:          true,
-		SampleRate:     1,
+	// OnePercentSampling is a configuration that samples 1% of the requests.
+	// TODO(#1712): Remove this and pull "static" configuration from the
+	// environment instead.
+	OnePercentSampling = &tracingconfig.Config{
+		Backend:        tracingconfig.Zipkin,
+		Debug:          false,
+		SampleRate:     0.01,
 		ZipkinEndpoint: "http://zipkin.istio-system.svc.cluster.local:9411/api/v2/spans",
 	}
-	// EnabledZeroSampling is a configuration that enables tracing, but has a sampling rate of zero.
-	// The intention is that this allows this to record traces that other components started, but
-	// will not start traces itself.
-	EnabledZeroSampling = &tracingconfig.Config{
-		Enable:         true,
-		Debug:          false,
-		SampleRate:     0,
+
+	// AlwaysSample is a configuration that samples 100% of the requests and sends them to Zipkin.
+	// It is expected to be used only for testing purposes (e.g. in e2e tests).
+	// TODO(#1712): Remove this and pull "static" configuration from the environment instead.
+	AlwaysSample = &tracingconfig.Config{
+		Backend:        tracingconfig.Zipkin,
+		Debug:          true,
+		SampleRate:     1.0,
 		ZipkinEndpoint: "http://zipkin.istio-system.svc.cluster.local:9411/api/v2/spans",
 	}
 )
 
-// setupZipkinPublishing sets up Zipkin trace publishing for the process. Note that other pieces
+// setupPublishing sets up trace publishing for the process. Note that other pieces
 // still need to generate the traces, this just ensures that if generated, they are collected
 // appropriately. This is normally done by using tracing.HTTPSpanMiddleware as a middleware HTTP
 // handler.
-func setupZipkinPublishing(serviceName string) (*tracing.OpenCensusTracer, error) {
-	// TODO Should we fill in the hostPort?
-	zipkinEndpoint, err := zipkin.NewEndpoint(serviceName, "")
-	if err != nil {
-		return nil, fmt.Errorf("unable to create tracing endpoint: %v", err)
-	}
-	oct := tracing.NewOpenCensusTracer(tracing.WithZipkinExporter(tracing.CreateZipkinReporter, zipkinEndpoint))
-	return oct, nil
+func setupPublishing(serviceName string, logger *zap.SugaredLogger) (*tracing.OpenCensusTracer, error) {
+	return tracing.NewOpenCensusTracer(tracing.WithExporter(serviceName, logger)), nil
 }
 
-// SetupStaticZipkinPublishing sets up Zipkin trace publishing for the process. Note that other
+// SetupStaticPublishing sets up trace publishing for the process. Note that other
 // pieces still need to generate the traces, this just ensures that if generated, they are collected
 // appropriately. This is normally done by using tracing.HTTPSpanMiddleware as a middleware HTTP
 // handler. The configuration will not be dynamically updated.
-func SetupStaticZipkinPublishing(serviceName string, cfg *tracingconfig.Config) error {
-	oct, err := setupZipkinPublishing(serviceName)
+func SetupStaticPublishing(logger *zap.SugaredLogger, serviceName string, cfg *tracingconfig.Config) error {
+	oct, err := setupPublishing(serviceName, logger)
 	if err != nil {
 		return err
 	}
@@ -77,13 +76,13 @@ func SetupStaticZipkinPublishing(serviceName string, cfg *tracingconfig.Config) 
 	return nil
 }
 
-// SetupDynamicZipkinPublishing sets up Zipkin trace publishing for the process, by watching a
+// SetupDynamicPublishing sets up trace publishing for the process, by watching a
 // ConfigMap for the configuration. Note that other pieces still need to generate the traces, this
 // just ensures that if generated, they are collected appropriately. This is normally done by using
 // tracing.HTTPSpanMiddleware as a middleware HTTP handler. The configuration will be dynamically
 // updated when the ConfigMap is updated.
-func SetupDynamicZipkinPublishing(logger *zap.SugaredLogger, configMapWatcher configmap.Watcher, serviceName string) error {
-	oct, err := setupZipkinPublishing(serviceName)
+func SetupDynamicPublishing(logger *zap.SugaredLogger, configMapWatcher *configmap.InformedWatcher, serviceName string) error {
+	oct, err := setupPublishing(serviceName, logger)
 	if err != nil {
 		return err
 	}
@@ -101,13 +100,31 @@ func SetupDynamicZipkinPublishing(logger *zap.SugaredLogger, configMapWatcher co
 	}
 
 	// Set up our config store.
-	configStore := configmap.NewUntypedStore(
+	configStore := eventingconfigmap.NewDefaultUntypedStore(
 		"tracing-config",
 		logger,
-		configmap.Constructors{
-			tracingconfig.ConfigName: tracingconfig.NewTracingConfigFromConfigMap,
+		[]eventingconfigmap.DefaultConstructor{
+			{
+				Default:     enableZeroSamplingCM(configMapWatcher.Namespace),
+				Constructor: tracingconfig.NewTracingConfigFromConfigMap,
+			},
 		},
 		tracerUpdater)
 	configStore.WatchConfigs(configMapWatcher)
 	return nil
+}
+
+func enableZeroSamplingCM(ns string) corev1.ConfigMap {
+	return corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      tracingconfig.ConfigName,
+			Namespace: ns,
+		},
+		Data: map[string]string{
+			"backend":         "zipkin",
+			"debug":           "False",
+			"sample-rate":     "0",
+			"zipkin-endpoint": "http://zipkin.istio-system.svc.cluster.local:9411/api/v2/spans",
+		},
+	}
 }

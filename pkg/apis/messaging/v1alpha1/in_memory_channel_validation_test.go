@@ -19,11 +19,11 @@ package v1alpha1
 import (
 	"testing"
 
-	eventingduck "github.com/knative/eventing/pkg/apis/duck/v1alpha1"
-	"github.com/knative/pkg/apis"
+	eventingduck "knative.dev/eventing/pkg/apis/duck/v1alpha1"
+	"knative.dev/pkg/apis"
 )
 
-func TestImMemoryChannelValidation(t *testing.T) {
+func TestInMemoryChannelValidation(t *testing.T) {
 	tests := []CRDTest{{
 		name: "empty",
 		cr: &InMemoryChannel{
@@ -35,7 +35,7 @@ func TestImMemoryChannelValidation(t *testing.T) {
 		cr: &InMemoryChannel{
 			Spec: InMemoryChannelSpec{
 				Subscribable: &eventingduck.Subscribable{
-					Subscribers: []eventingduck.ChannelSubscriberSpec{{
+					Subscribers: []eventingduck.SubscriberSpec{{
 						SubscriberURI: "subscriberendpoint",
 						ReplyURI:      "resultendpoint",
 					}},
@@ -47,7 +47,7 @@ func TestImMemoryChannelValidation(t *testing.T) {
 		cr: &InMemoryChannel{
 			Spec: InMemoryChannelSpec{
 				Subscribable: &eventingduck.Subscribable{
-					Subscribers: []eventingduck.ChannelSubscriberSpec{{
+					Subscribers: []eventingduck.SubscriberSpec{{
 						SubscriberURI: "subscriberendpoint",
 						ReplyURI:      "replyendpoint",
 					}, {}},
@@ -63,7 +63,7 @@ func TestImMemoryChannelValidation(t *testing.T) {
 		cr: &InMemoryChannel{
 			Spec: InMemoryChannelSpec{
 				Subscribable: &eventingduck.Subscribable{
-					Subscribers: []eventingduck.ChannelSubscriberSpec{{}, {}},
+					Subscribers: []eventingduck.SubscriberSpec{{}, {}},
 				},
 			},
 		},

@@ -25,6 +25,17 @@ import (
 	"k8s.io/client-go/dynamic"
 )
 
+type MockHandled int
+
+const (
+	// This mock has handled the function call, no further mocks nor the real client should be
+	// called.
+	Handled MockHandled = iota
+	// This mock has not handled the function call, subsequent mocks or the real client should be
+	// called.
+	Unhandled
+)
+
 // All of the functions in dynamic.Interface get mocked equivalents.
 type MockDynamicResource func(innerInterface dynamic.Interface, resource schema.GroupVersionResource) (MockHandled, dynamic.NamespaceableResourceInterface)
 
@@ -39,7 +50,7 @@ type MockDynamicDeleteCollection func(ctx *MockDynamicContext, options *metav1.D
 type MockDynamicGet func(ctx *MockDynamicContext, name string, options metav1.GetOptions, subresources ...string) (MockHandled, *unstructured.Unstructured, error)
 type MockDynamicList func(ctx *MockDynamicContext, opts metav1.ListOptions) (MockHandled, *unstructured.UnstructuredList, error)
 type MockDynamicWatch func(ctx *MockDynamicContext, opts metav1.ListOptions) (MockHandled, watch.Interface, error)
-type MockDynamicPatch func(ctx *MockDynamicContext, name string, pt types.PatchType, data []byte, options metav1.UpdateOptions, subresources ...string) (MockHandled, *unstructured.Unstructured, error)
+type MockDynamicPatch func(ctx *MockDynamicContext, name string, pt types.PatchType, data []byte, options metav1.PatchOptions, subresources ...string) (MockHandled, *unstructured.Unstructured, error)
 
 type MockDynamicInterface struct {
 	innerInterface dynamic.Interface
@@ -241,7 +252,7 @@ func (m *mockDynamicResourceInterface) Watch(opts metav1.ListOptions) (watch.Int
 	return m.ctx.InnerInterface.Watch(opts)
 }
 
-func (m *mockDynamicResourceInterface) Patch(name string, pt types.PatchType, data []byte, options metav1.UpdateOptions, subresources ...string) (*unstructured.Unstructured, error) {
+func (m *mockDynamicResourceInterface) Patch(name string, pt types.PatchType, data []byte, options metav1.PatchOptions, subresources ...string) (*unstructured.Unstructured, error) {
 	for i, mockPatch := range m.mocks.MockPatches {
 		handled, u, err := mockPatch(m.ctx, name, pt, data, options, subresources...)
 		if handled == Handled {

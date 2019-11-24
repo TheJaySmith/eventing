@@ -18,40 +18,34 @@ package containersource
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"time"
 
+	"knative.dev/pkg/resolver"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	appsv1informers "k8s.io/client-go/informers/apps/v1"
 	appsv1listers "k8s.io/client-go/listers/apps/v1"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/knative/eventing/pkg/apis/sources/v1alpha1"
-	sourceinformers "github.com/knative/eventing/pkg/client/informers/externalversions/sources/v1alpha1"
-	listers "github.com/knative/eventing/pkg/client/listers/sources/v1alpha1"
-	"github.com/knative/eventing/pkg/duck"
-	"github.com/knative/eventing/pkg/logging"
-	"github.com/knative/eventing/pkg/reconciler"
-	"github.com/knative/eventing/pkg/reconciler/containersource/resources"
-	"github.com/knative/pkg/controller"
 	"go.uber.org/zap"
+	"knative.dev/pkg/controller"
+
+	status "knative.dev/eventing/pkg/apis/duck"
+	"knative.dev/eventing/pkg/apis/sources/v1alpha1"
+	listers "knative.dev/eventing/pkg/client/listers/sources/v1alpha1"
+	"knative.dev/eventing/pkg/logging"
+	"knative.dev/eventing/pkg/reconciler"
+	"knative.dev/eventing/pkg/reconciler/containersource/resources"
 )
 
 const (
-	// ReconcilerName is the name of the reconciler
-	ReconcilerName = "ContainerSources"
-	// controllerAgentName is the string used by this controller to identify
-	// itself when creating events.
-	controllerAgentName = "container-source-controller"
-
 	// Name of the corev1.Events emitted from the reconciliation process
 	sourceReconciled         = "ContainerSourceReconciled"
 	sourceReadinessChanged   = "ContainerSourceReadinessChanged"
@@ -65,37 +59,11 @@ type Reconciler struct {
 	containerSourceLister listers.ContainerSourceLister
 	deploymentLister      appsv1listers.DeploymentLister
 
-	sinkReconciler *duck.SinkReconciler
+	sinkResolver *resolver.URIResolver
 }
 
 // Check that our Reconciler implements controller.Reconciler
 var _ controller.Reconciler = (*Reconciler)(nil)
-
-// NewController initializes the controller and is called by the generated code
-// Registers event handlers to enqueue events
-func NewController(
-	opt reconciler.Options,
-	containerSourceInformer sourceinformers.ContainerSourceInformer,
-	deploymentInformer appsv1informers.DeploymentInformer,
-) *controller.Impl {
-	r := &Reconciler{
-		Base:                  reconciler.NewBase(opt, controllerAgentName),
-		containerSourceLister: containerSourceInformer.Lister(),
-		deploymentLister:      deploymentInformer.Lister(),
-	}
-	impl := controller.NewImpl(r, r.Logger, ReconcilerName, reconciler.MustNewStatsReporter(ReconcilerName, r.Logger))
-	r.sinkReconciler = duck.NewSinkReconciler(opt, impl.EnqueueKey)
-
-	r.Logger.Info("Setting up event handlers")
-	containerSourceInformer.Informer().AddEventHandler(reconciler.Handler(impl.Enqueue))
-
-	deploymentInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-		FilterFunc: controller.Filter(v1alpha1.SchemeGroupVersion.WithKind("ContainerSource")),
-		Handler:    reconciler.Handler(impl.EnqueueControllerOf),
-	})
-
-	return impl
-}
 
 // Reconcile compares the actual state with the desired, and attempts to
 // converge the two. It then updates the Status block of the CronJobSource
@@ -147,6 +115,7 @@ func (r *Reconciler) reconcile(ctx context.Context, source *v1alpha1.ContainerSo
 		return nil
 	}
 
+	source.Status.ObservedGeneration = source.Generation
 	source.Status.InitializeConditions()
 
 	annotations := make(map[string]string)
@@ -167,10 +136,11 @@ func (r *Reconciler) reconcile(ctx context.Context, source *v1alpha1.ContainerSo
 		Source:             source,
 		Name:               source.Name,
 		Namespace:          source.Namespace,
-		Image:              source.Spec.Image,
-		Args:               source.Spec.Args,
-		Env:                source.Spec.Env,
-		ServiceAccountName: source.Spec.ServiceAccountName,
+		Template:           source.Spec.Template,
+		Image:              source.Spec.DeprecatedImage,
+		Args:               source.Spec.DeprecatedArgs,
+		Env:                source.Spec.DeprecatedEnv,
+		ServiceAccountName: source.Spec.DeprecatedServiceAccountName,
 		Annotations:        annotations,
 		Labels:             labels,
 	}
@@ -181,48 +151,15 @@ func (r *Reconciler) reconcile(ctx context.Context, source *v1alpha1.ContainerSo
 		return err
 	}
 
-	deploy, err := r.getDeployment(ctx, source)
+	ra, err := r.reconcileReceiveAdapter(ctx, source, args)
 	if err != nil {
-		if errors.IsNotFound(err) {
-			deploy, err = r.createDeployment(ctx, source, nil, args)
-			if err != nil {
-				r.markNotDeployedRecordEvent(source, corev1.EventTypeWarning, "DeploymentCreateFailed", "Could not create deployment: %v", err)
-				return err
-			}
-			r.markDeployingAndRecordEvent(source, corev1.EventTypeNormal, "DeploymentCreated", "Created deployment %q", deploy.Name)
-			// Since the Deployment has just been created, there's nothing more
-			// to do until it gets a status. This ContainerSource will be reconciled
-			// again when the Deployment is updated.
-			return nil
-		}
-		// Something unexpected happened getting the deployment.
-		r.markDeployingAndRecordEvent(source, corev1.EventTypeWarning, "DeploymentGetFailed", "Error getting deployment: %v", err)
-		return err
+		return fmt.Errorf("reconciling receive adapter: %v", err)
 	}
 
-	// Update Deployment spec if it's changed
-	expected := resources.MakeDeployment(args)
-	// Since the Deployment spec has fields defaulted by the webhook, it won't
-	// be equal to expected. Use DeepDerivative to compare only the fields that
-	// are set in expected.
-	if !equality.Semantic.DeepDerivative(expected.Spec, deploy.Spec) {
-		deploy.Spec = expected.Spec
-		deploy, err := r.KubeClientSet.AppsV1().Deployments(deploy.Namespace).Update(deploy)
-		if err != nil {
-			r.markDeployingAndRecordEvent(source, corev1.EventTypeWarning, "DeploymentUpdateFailed", "Failed to update deployment %q: %v", deploy.Name, err)
-		} else {
-			r.markDeployingAndRecordEvent(source, corev1.EventTypeNormal, "DeploymentUpdated", "Updated deployment %q", deploy.Name)
-		}
-		// Return after this update or error and reconcile again
-		return err
-	}
-
-	// Update source status
-	if deploy.Status.ReadyReplicas > 0 && !source.Status.IsDeployed() {
+	if status.DeploymentIsAvailable(&ra.Status, false) {
 		source.Status.MarkDeployed()
-		r.Recorder.Eventf(source, corev1.EventTypeNormal, "DeploymentReady", "Deployment %q has %d ready replicas", deploy.Name, deploy.Status.ReadyReplicas)
+		r.Recorder.Eventf(source, corev1.EventTypeNormal, "DeploymentReady", "Deployment %q has %d ready replicas", ra.Name, ra.Status.ReadyReplicas)
 	}
-
 	return nil
 }
 
@@ -232,60 +169,118 @@ func (r *Reconciler) reconcile(ctx context.Context, source *v1alpha1.ContainerSo
 // If an error is returned from this function, the caller should also record
 // an Event containing the error string.
 func (r *Reconciler) setSinkURIArg(ctx context.Context, source *v1alpha1.ContainerSource, args *resources.ContainerArguments) error {
+
 	if uri, ok := sinkArg(source); ok {
-		args.SinkInArgs = true
 		source.Status.MarkSink(uri)
 		return nil
 	}
 
 	if source.Spec.Sink == nil {
 		source.Status.MarkNoSink("Missing", "Sink missing from spec")
-		return fmt.Errorf("Sink missing from spec")
+		return errors.New("sink missing from spec")
 	}
 
-	sinkObjRef := source.Spec.Sink
-	if sinkObjRef.Namespace == "" {
-		sinkObjRef.Namespace = source.Namespace
+	dest := source.Spec.Sink.DeepCopy()
+	if dest.Ref != nil {
+		// To call URIFromDestination(), dest.Ref must have a Namespace. If there is
+		// no Namespace defined in dest.Ref, we will use the Namespace of the source
+		// as the Namespace of dest.Ref.
+		if dest.Ref.Namespace == "" {
+			//TODO how does this work with deprecated fields
+			dest.Ref.Namespace = source.GetNamespace()
+		}
+	} else if dest.DeprecatedName != "" && dest.DeprecatedNamespace == "" {
+		// If Ref is nil and the deprecated ref is present, we need to check for
+		// DeprecatedNamespace. This can be removed when DeprecatedNamespace is
+		// removed.
+		dest.DeprecatedNamespace = source.GetNamespace()
 	}
 
-	sourceDesc := source.Namespace + "/" + source.Name + ", " + source.GroupVersionKind().String()
-	uri, err := r.sinkReconciler.GetSinkURI(source.Spec.Sink, source, sourceDesc)
+	sinkURI, err := r.sinkResolver.URIFromDestination(*dest, source)
 	if err != nil {
-		source.Status.MarkNoSink("NotFound", `Couldn't get Sink URI from "%s/%s": %v"`, source.Spec.Sink.Namespace, source.Spec.Sink.Name, err)
-		return err
+		source.Status.MarkNoSink("NotFound", `Couldn't get Sink URI from "%s/%s"`, dest.Ref.Namespace, dest.Ref.Name)
+		return fmt.Errorf("getting sink URI: %v", err)
 	}
-	source.Status.MarkSink(uri)
-	args.Sink = uri
+	if source.Spec.Sink.DeprecatedAPIVersion != "" &&
+		source.Spec.Sink.DeprecatedKind != "" &&
+		source.Spec.Sink.DeprecatedName != "" {
+		source.Status.MarkSinkWarnRefDeprecated(sinkURI)
+	} else {
+		source.Status.MarkSink(sinkURI)
+	}
+
+	args.Sink = sinkURI
 
 	return nil
 }
 
 func sinkArg(source *v1alpha1.ContainerSource) (string, bool) {
-	for _, a := range source.Spec.Args {
+	var args []string
+
+	if source.Spec.Template != nil {
+		for _, c := range source.Spec.Template.Spec.Containers {
+			args = append(args, c.Args...)
+		}
+	}
+
+	args = append(args, source.Spec.DeprecatedArgs...)
+
+	for _, a := range args {
 		if strings.HasPrefix(a, "--sink=") {
 			return strings.Replace(a, "--sink=", "", -1), true
 		}
 	}
+
 	return "", false
 }
 
-func (r *Reconciler) getDeployment(ctx context.Context, source *v1alpha1.ContainerSource) (*appsv1.Deployment, error) {
-	dl, err := r.KubeClientSet.AppsV1().Deployments(source.Namespace).List(metav1.ListOptions{})
-	if err != nil {
-		r.Logger.Errorf("Unable to list deployments: %v", zap.Error(err))
-		return nil, err
-	}
-	for _, c := range dl.Items {
-		if metav1.IsControlledBy(&c, source) {
-			return &c, nil
+func (r *Reconciler) reconcileReceiveAdapter(ctx context.Context, src *v1alpha1.ContainerSource, args resources.ContainerArguments) (*appsv1.Deployment, error) {
+	expected := resources.MakeDeployment(args)
+
+	ra, err := r.KubeClientSet.AppsV1().Deployments(src.Namespace).Get(expected.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		ra, err = r.KubeClientSet.AppsV1().Deployments(src.Namespace).Create(expected)
+		if err != nil {
+			r.markNotDeployedRecordEvent(src, corev1.EventTypeWarning, "DeploymentCreateFailed", "Could not create deployment: %v", err)
+			return nil, fmt.Errorf("creating new deployment: %v", err)
 		}
+		r.markDeployingAndRecordEvent(src, corev1.EventTypeNormal, "DeploymentCreated", "Created deployment %q", ra.Name)
+		return ra, nil
+	} else if err != nil {
+		r.markDeployingAndRecordEvent(src, corev1.EventTypeWarning, "DeploymentGetFailed", "Error getting deployment: %v", err)
+		return nil, fmt.Errorf("getting deployment: %v", err)
+	} else if !metav1.IsControlledBy(ra, src) {
+		r.markDeployingAndRecordEvent(src, corev1.EventTypeWarning, "DeploymentNotOwned", "Deployment %q is not owned by this ContainerSource", ra.Name)
+		return nil, fmt.Errorf("deployment %q is not owned by ContainerSource %q", ra.Name, src.Name)
+	} else if r.podSpecChanged(ra.Spec.Template.Spec, expected.Spec.Template.Spec) {
+		ra.Spec.Template.Spec = expected.Spec.Template.Spec
+		ra, err = r.KubeClientSet.AppsV1().Deployments(src.Namespace).Update(ra)
+		if err != nil {
+			return ra, fmt.Errorf("updating deployment: %v", err)
+		}
+		return ra, nil
+	} else {
+		logging.FromContext(ctx).Debug("Reusing existing receive adapter", zap.Any("receiveAdapter", ra))
 	}
-	return nil, errors.NewNotFound(schema.GroupResource{}, "")
+	return ra, nil
 }
 
-func (r *Reconciler) createDeployment(ctx context.Context, source *v1alpha1.ContainerSource, org *appsv1.Deployment, args resources.ContainerArguments) (*appsv1.Deployment, error) {
-	deployment := resources.MakeDeployment(args)
-	return r.KubeClientSet.AppsV1().Deployments(source.Namespace).Create(deployment)
+func (r *Reconciler) podSpecChanged(oldPodSpec corev1.PodSpec, newPodSpec corev1.PodSpec) bool {
+	// Since the Deployment spec has fields defaulted by the webhook, it won't
+	// be equal to expected. Use DeepDerivative to compare only the fields that
+	// are set in newPodSpec.
+	if !equality.Semantic.DeepDerivative(newPodSpec, oldPodSpec) {
+		return true
+	}
+	if len(oldPodSpec.Containers) != len(newPodSpec.Containers) {
+		return true
+	}
+	for i := range newPodSpec.Containers {
+		if !equality.Semantic.DeepEqual(newPodSpec.Containers[i].Env, oldPodSpec.Containers[i].Env) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) markDeployingAndRecordEvent(source *v1alpha1.ContainerSource, evType string, reason string, messageFmt string, args ...interface{}) {
@@ -320,8 +315,8 @@ func (r *Reconciler) updateStatus(ctx context.Context, desired *v1alpha1.Contain
 		duration := time.Since(cj.ObjectMeta.CreationTimestamp.Time)
 		r.Logger.Infof("ContainerSource %q became ready after %v", source.Name, duration)
 		r.Recorder.Event(source, corev1.EventTypeNormal, sourceReadinessChanged, fmt.Sprintf("ContainerSource %q became ready", source.Name))
-		if err := r.StatsReporter.ReportReady("ContainerSource", source.Namespace, source.Name, duration); err != nil {
-			logging.FromContext(ctx).Sugar().Infof("failed to record ready for ContainerSource, %v", err)
+		if reportErr := r.StatsReporter.ReportReady("ContainerSource", source.Namespace, source.Name, duration); reportErr != nil {
+			logging.FromContext(ctx).Sugar().Infof("failed to record ready for ContainerSource, %v", reportErr)
 		}
 	}
 

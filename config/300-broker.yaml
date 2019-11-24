@@ -17,10 +17,15 @@ kind: CustomResourceDefinition
 metadata:
   name: brokers.eventing.knative.dev
   labels:
+    eventing.knative.dev/release: devel
     knative.dev/crd-install: "true"
+    duck.knative.dev/addressable: "true"
 spec:
   group: eventing.knative.dev
-  version: v1alpha1
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
   names:
     kind: Broker
     plural: brokers
@@ -39,9 +44,9 @@ spec:
     - name: Reason
       type: string
       JSONPath: ".status.conditions[?(@.type==\"Ready\")].reason"
-    - name: Hostname
+    - name: URL
       type: string
-      JSONPath: .status.address.hostname
+      JSONPath: .status.address.url
     - name: Age
       type: date
       JSONPath: .metadata.creationTimestamp
@@ -50,26 +55,17 @@ spec:
       properties:
         spec:
           properties:
-            channelTemplate:
+            channelTemplateSpec:
               type: object
               required:
-                - provisioner
+                - apiVersion
+                - kind
               properties:
-                provisioner:
-                  type: object
-                  required:
-                    - apiVersion
-                    - kind
-                    - name
-                  properties:
-                    apiVersion:
-                      type: string
-                      minLength: 1
-                    kind:
-                      type: string
-                      minLength: 1
-                    name:
-                      type: string
-                      minLength: 1
-                arguments:
+                apiVersion:
+                  type: string
+                  minLength: 1
+                kind:
+                  type: string
+                  minLength: 1
+                spec:
                   type: object

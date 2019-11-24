@@ -24,42 +24,32 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/knative/eventing/pkg/apis/eventing/v1alpha1"
-	eventinginformers "github.com/knative/eventing/pkg/client/informers/externalversions/eventing/v1alpha1"
-	listers "github.com/knative/eventing/pkg/client/listers/eventing/v1alpha1"
-	"github.com/knative/eventing/pkg/duck"
-	"github.com/knative/eventing/pkg/logging"
-	"github.com/knative/eventing/pkg/reconciler"
-	"github.com/knative/eventing/pkg/reconciler/broker"
-	brokerresources "github.com/knative/eventing/pkg/reconciler/broker/resources"
-	"github.com/knative/eventing/pkg/reconciler/names"
-	"github.com/knative/eventing/pkg/reconciler/trigger/path"
-	"github.com/knative/eventing/pkg/reconciler/trigger/resources"
-	"github.com/knative/eventing/pkg/utils"
-	"github.com/knative/pkg/controller"
-	"github.com/knative/pkg/tracker"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	corev1informers "k8s.io/client-go/informers/core/v1"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	messagingv1alpha1 "knative.dev/eventing/pkg/apis/messaging/v1alpha1"
+	listers "knative.dev/eventing/pkg/client/listers/eventing/v1alpha1"
+	messaginglisters "knative.dev/eventing/pkg/client/listers/messaging/v1alpha1"
+	"knative.dev/eventing/pkg/duck"
+	"knative.dev/eventing/pkg/logging"
+	"knative.dev/eventing/pkg/reconciler"
+	brokerresources "knative.dev/eventing/pkg/reconciler/broker/resources"
+	"knative.dev/eventing/pkg/reconciler/names"
+	"knative.dev/eventing/pkg/reconciler/trigger/path"
+	"knative.dev/eventing/pkg/reconciler/trigger/resources"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
+	duckv1beta1 "knative.dev/pkg/apis/duck/v1beta1"
+	"knative.dev/pkg/controller"
+	"knative.dev/pkg/resolver"
+	"knative.dev/pkg/tracker"
 )
 
 const (
-	// ReconcilerName is the name of the reconciler
-	ReconcilerName = "Triggers"
-
-	// controllerAgentName is the string used by this controller to identify
-	// itself when creating events.
-	controllerAgentName = "trigger-controller"
-
-	finalizerName = controllerAgentName
-
 	// Name of the corev1.Events emitted from the reconciliation process.
 	triggerReconciled         = "TriggerReconciled"
 	triggerReadinessChanged   = "TriggerReadinessChanged"
@@ -67,6 +57,7 @@ const (
 	triggerUpdateStatusFailed = "TriggerUpdateStatusFailed"
 	subscriptionDeleteFailed  = "SubscriptionDeleteFailed"
 	subscriptionCreateFailed  = "SubscriptionCreateFailed"
+	subscriptionGetFailed     = "SubscriptionGetFailed"
 	triggerChannelFailed      = "TriggerChannelFailed"
 	ingressChannelFailed      = "IngressChannelFailed"
 	triggerServiceFailed      = "TriggerServiceFailed"
@@ -75,65 +66,24 @@ const (
 type Reconciler struct {
 	*reconciler.Base
 
-	triggerLister       listers.TriggerLister
-	channelLister       listers.ChannelLister
-	subscriptionLister  listers.SubscriptionLister
-	brokerLister        listers.BrokerLister
-	serviceLister       corev1listers.ServiceLister
-	tracker             tracker.Interface
-	addressableInformer duck.AddressableInformer
+	triggerLister      listers.TriggerLister
+	subscriptionLister messaginglisters.SubscriptionLister
+	brokerLister       listers.BrokerLister
+	serviceLister      corev1listers.ServiceLister
+	namespaceLister    corev1listers.NamespaceLister
+	// Regular tracker to track static resources. In particular, it tracks Broker's changes.
+	tracker tracker.Interface
+	// Dynamic tracker to track KResources. In particular, it tracks the dependency between Triggers and Sources.
+	kresourceTracker duck.ListableTracker
+	// Dynamic tracker to track AddressableTypes. In particular, it tracks Trigger subscribers.
+	addressableTracker duck.ListableTracker
+	uriResolver        *resolver.URIResolver
 }
 
 var brokerGVK = v1alpha1.SchemeGroupVersion.WithKind("Broker")
 
 // Check that our Reconciler implements controller.Reconciler.
 var _ controller.Reconciler = (*Reconciler)(nil)
-
-// NewController initializes the controller and is called by the generated code.
-// Registers event handlers to enqueue events.
-func NewController(
-	opt reconciler.Options,
-	triggerInformer eventinginformers.TriggerInformer,
-	channelInformer eventinginformers.ChannelInformer,
-	subscriptionInformer eventinginformers.SubscriptionInformer,
-	brokerInformer eventinginformers.BrokerInformer,
-	serviceInformer corev1informers.ServiceInformer,
-	addressableInformer duck.AddressableInformer,
-) *controller.Impl {
-
-	r := &Reconciler{
-		Base:                reconciler.NewBase(opt, controllerAgentName),
-		triggerLister:       triggerInformer.Lister(),
-		channelLister:       channelInformer.Lister(),
-		subscriptionLister:  subscriptionInformer.Lister(),
-		brokerLister:        brokerInformer.Lister(),
-		serviceLister:       serviceInformer.Lister(),
-		addressableInformer: addressableInformer,
-	}
-	impl := controller.NewImpl(r, r.Logger, ReconcilerName, reconciler.MustNewStatsReporter(ReconcilerName, r.Logger))
-
-	r.Logger.Info("Setting up event handlers")
-	triggerInformer.Informer().AddEventHandler(reconciler.Handler(impl.Enqueue))
-
-	// Tracker is used to notify us that a Trigger's Broker has changed so that
-	// we can reconcile.
-	r.tracker = tracker.New(impl.EnqueueKey, opt.GetTrackerLease())
-	brokerInformer.Informer().AddEventHandler(reconciler.Handler(
-		// Call the tracker's OnChanged method, but we've seen the objects
-		// coming through this path missing TypeMeta, so ensure it is properly
-		// populated.
-		controller.EnsureTypeMeta(
-			r.tracker.OnChanged,
-			v1alpha1.SchemeGroupVersion.WithKind("Broker"),
-		),
-	))
-
-	subscriptionInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-		FilterFunc: controller.Filter(v1alpha1.SchemeGroupVersion.WithKind("Trigger")),
-		Handler:    reconciler.Handler(impl.EnqueueControllerOf),
-	})
-	return impl
-}
 
 // Reconcile compares the actual state with the desired, and attempts to
 // converge the two. It then updates the Status block of the Trigger resource
@@ -191,10 +141,24 @@ func (r *Reconciler) reconcile(ctx context.Context, t *v1alpha1.Trigger) error {
 	// 3. Find the Subscriber's URI.
 	// 4. Creates a Subscription from the Broker's Trigger Channel to this Trigger via the Broker's
 	//    Filter Service with a specific path, and reply set to the Broker's Ingress Channel.
+	// 5. Find whether there is annotation with key "knative.dev/dependency".
+	// If not, mark Dependency to be succeeded, else figure out whether the dependency is ready and mark Dependency correspondingly
 
 	if t.DeletionTimestamp != nil {
 		// Everything is cleaned up by the garbage collector.
 		return nil
+	}
+	// Tell tracker to reconcile this Trigger whenever the Broker changes.
+	brokerObjRef := corev1.ObjectReference{
+		Kind:       brokerGVK.Kind,
+		APIVersion: brokerGVK.GroupVersion().String(),
+		Name:       t.Spec.Broker,
+		Namespace:  t.Namespace,
+	}
+
+	if err := r.tracker.Track(brokerObjRef, t); err != nil {
+		logging.FromContext(ctx).Error("Unable to track changes to Broker", zap.Error(err))
+		return err
 	}
 
 	b, err := r.brokerLister.Brokers(t.Namespace).Get(t.Spec.Broker)
@@ -202,6 +166,12 @@ func (r *Reconciler) reconcile(ctx context.Context, t *v1alpha1.Trigger) error {
 		logging.FromContext(ctx).Error("Unable to get the Broker", zap.Error(err))
 		if apierrs.IsNotFound(err) {
 			t.Status.MarkBrokerFailed("DoesNotExist", "Broker does not exist")
+			_, needDefaultBroker := t.GetAnnotations()[v1alpha1.InjectionAnnotation]
+			if t.Spec.Broker == "default" && needDefaultBroker {
+				if e := r.labelNamespace(ctx, t); e != nil {
+					logging.FromContext(ctx).Error("Unable to label the namespace", zap.Error(e))
+				}
+			}
 		} else {
 			t.Status.MarkBrokerFailed("BrokerGetFailed", "Failed to get broker")
 		}
@@ -209,36 +179,18 @@ func (r *Reconciler) reconcile(ctx context.Context, t *v1alpha1.Trigger) error {
 	}
 	t.Status.PropagateBrokerStatus(&b.Status)
 
-	// Tell tracker to reconcile this Trigger whenever the Broker changes.
-	track := r.addressableInformer.TrackInNamespace(r.tracker, t)
-	if err = track(utils.ObjectRef(b, brokerGVK)); err != nil {
-		logging.FromContext(ctx).Error("Unable to track changes to Broker", zap.Error(err))
-		return err
+	brokerTrigger := b.Status.TriggerChannel
+	if brokerTrigger == nil {
+		logging.FromContext(ctx).Error("Broker TriggerChannel not populated")
+		r.Recorder.Eventf(t, corev1.EventTypeWarning, triggerChannelFailed, "Broker's Trigger channel not found")
+		return errors.New("failed to find Broker's Trigger channel")
 	}
 
-	brokerTrigger, err := r.getBrokerTriggerChannel(ctx, b)
-	if err != nil {
-		if apierrs.IsNotFound(err) {
-			logging.FromContext(ctx).Error("can not find Broker's Trigger Channel", zap.Error(err))
-			r.Recorder.Eventf(t, corev1.EventTypeWarning, triggerChannelFailed, "Broker's Trigger channel not found")
-			return errors.New("failed to find Broker's Trigger channel")
-		} else {
-			logging.FromContext(ctx).Error("failed to get Broker's Trigger Channel", zap.Error(err))
-			r.Recorder.Eventf(t, corev1.EventTypeWarning, triggerChannelFailed, "Failed to get Broker's Trigger channel")
-			return err
-		}
-	}
-	brokerIngress, err := r.getBrokerIngressChannel(ctx, b)
-	if err != nil {
-		if apierrs.IsNotFound(err) {
-			logging.FromContext(ctx).Error("can not find Broker's Ingress Channel", zap.Error(err))
-			r.Recorder.Eventf(t, corev1.EventTypeWarning, ingressChannelFailed, "Broker's Ingress channel not found")
-			return errors.New("failed to find Broker's Ingress channel")
-		} else {
-			logging.FromContext(ctx).Error("failed to get Broker's Ingress Channel", zap.Error(err))
-			r.Recorder.Eventf(t, corev1.EventTypeWarning, ingressChannelFailed, "Failed to get Broker's Ingress channel")
-			return err
-		}
+	brokerIngress := b.Status.IngressChannel
+	if brokerIngress == nil {
+		logging.FromContext(ctx).Error("Broker IngressChannel not populated")
+		r.Recorder.Eventf(t, corev1.EventTypeWarning, ingressChannelFailed, "Broker's Ingress channel not found")
+		return errors.New("failed to find Broker's Ingress channel")
 	}
 
 	// Get Broker filter service.
@@ -248,19 +200,38 @@ func (r *Reconciler) reconcile(ctx context.Context, t *v1alpha1.Trigger) error {
 			logging.FromContext(ctx).Error("can not find Broker's Filter service", zap.Error(err))
 			r.Recorder.Eventf(t, corev1.EventTypeWarning, triggerServiceFailed, "Broker's Filter service not found")
 			return errors.New("failed to find Broker's Filter service")
-		} else {
-			logging.FromContext(ctx).Error("failed to get Broker's Filter service", zap.Error(err))
-			r.Recorder.Eventf(t, corev1.EventTypeWarning, triggerServiceFailed, "Failed to get Broker's Filter service")
-			return err
 		}
+		logging.FromContext(ctx).Error("failed to get Broker's Filter service", zap.Error(err))
+		r.Recorder.Eventf(t, corev1.EventTypeWarning, triggerServiceFailed, "Failed to get Broker's Filter service")
+		return err
 	}
 
-	subscriberURI, err := duck.SubscriberSpec(ctx, r.DynamicClientSet, t.Namespace, t.Spec.Subscriber, track)
+	if t.Spec.Subscriber == nil {
+		return errors.New("subscriber cannot be nil")
+	}
+
+	if t.Spec.Subscriber.Ref != nil {
+		// To call URIFromDestination(dest apisv1alpha1.Destination, parent interface{}), dest.Ref must have a Namespace
+		// We will use the Namespace of Trigger as the Namespace of dest.Ref
+		t.Spec.Subscriber.Ref.Namespace = t.GetNamespace()
+		// Since Trigger never allowed ref fields at the subscriber level and
+		// validates that they are absent, we can ignore them here.
+	}
+
+	// TODO: Remove this once pkg supports resolving v1.Destination natively.
+	v1beta1Destination := duckv1beta1.Destination{
+		Ref: t.Spec.Subscriber.Ref,
+		URI: t.Spec.Subscriber.URI,
+	}
+	subscriberURI, err := r.uriResolver.URIFromDestination(v1beta1Destination, t)
 	if err != nil {
 		logging.FromContext(ctx).Error("Unable to get the Subscriber's URI", zap.Error(err))
+		t.Status.MarkSubscriberResolvedFailed("Unable to get the Subscriber's URI", "%v", err)
+		t.Status.SubscriberURI = ""
 		return err
 	}
 	t.Status.SubscriberURI = subscriberURI
+	t.Status.MarkSubscriberResolvedSucceeded()
 
 	sub, err := r.subscribeToBrokerChannel(ctx, t, brokerTrigger, brokerIngress, filterSvc)
 	if err != nil {
@@ -270,6 +241,61 @@ func (r *Reconciler) reconcile(ctx context.Context, t *v1alpha1.Trigger) error {
 	}
 	t.Status.PropagateSubscriptionStatus(&sub.Status)
 
+	if err := r.checkDependencyAnnotation(ctx, t); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *Reconciler) checkDependencyAnnotation(ctx context.Context, t *v1alpha1.Trigger) error {
+	if dependencyAnnotation, ok := t.GetAnnotations()[v1alpha1.DependencyAnnotation]; ok {
+		dependencyObjRef, err := v1alpha1.GetObjRefFromDependencyAnnotation(dependencyAnnotation)
+		if err != nil {
+			t.Status.MarkDependencyFailed("ReferenceError", "Unable to unmarshal objectReference from dependency annotation of trigger: %v", err)
+			return fmt.Errorf("getting object ref from dependency annotation %q: %v", dependencyAnnotation, err)
+		}
+		trackKResource := r.kresourceTracker.TrackInNamespace(t)
+		// Trigger and its dependent source are in the same namespace, we already did the validation in the webhook.
+		if err := trackKResource(dependencyObjRef); err != nil {
+			return fmt.Errorf("tracking dependency: %v", err)
+		}
+		if err := r.propagateDependencyReadiness(ctx, t, dependencyObjRef); err != nil {
+			return fmt.Errorf("propagating dependency readiness: %v", err)
+		}
+	} else {
+		t.Status.MarkDependencySucceeded()
+	}
+	return nil
+}
+
+func (r *Reconciler) propagateDependencyReadiness(ctx context.Context, t *v1alpha1.Trigger, dependencyObjRef corev1.ObjectReference) error {
+	lister, err := r.kresourceTracker.ListerFor(dependencyObjRef)
+	if err != nil {
+		t.Status.MarkDependencyUnknown("ListerDoesNotExist", "Failed to retrieve lister: %v", err)
+		return fmt.Errorf("retrieving lister: %v", err)
+	}
+	dependencyObj, err := lister.ByNamespace(t.GetNamespace()).Get(dependencyObjRef.Name)
+	if err != nil {
+		if apierrs.IsNotFound(err) {
+			t.Status.MarkDependencyUnknown("DependencyDoesNotExist", "Dependency does not exist: %v", err)
+		} else {
+			t.Status.MarkDependencyUnknown("DependencyGetFailed", "Failed to get dependency: %v", err)
+		}
+		return fmt.Errorf("getting the dependency: %v", err)
+	}
+	dependency := dependencyObj.(*duckv1.KResource)
+
+	// The dependency hasn't yet reconciled our latest changes to
+	// its desired state, so its conditions are outdated.
+	if dependency.GetGeneration() != dependency.Status.ObservedGeneration {
+		logging.FromContext(ctx).Info("The ObjectMeta Generation of dependency is not equal to the observedGeneration of status",
+			zap.Any("objectMetaGeneration", dependency.GetGeneration()),
+			zap.Any("statusObservedGeneration", dependency.Status.ObservedGeneration))
+		t.Status.MarkDependencyUnknown("GenerationNotEqual", "The dependency's metadata.generation, %q, is not equal to its status.observedGeneration, %q.", dependency.GetGeneration(), dependency.Status.ObservedGeneration)
+		return nil
+	}
+	t.Status.PropagateDependencyStatus(dependency)
 	return nil
 }
 
@@ -302,53 +328,34 @@ func (r *Reconciler) updateStatus(ctx context.Context, desired *v1alpha1.Trigger
 	return trig, err
 }
 
-// getBrokerTriggerChannel return the Broker's Trigger Channel if it exists, otherwise it returns an
-// error.
-func (r *Reconciler) getBrokerTriggerChannel(ctx context.Context, b *v1alpha1.Broker) (*v1alpha1.Channel, error) {
-	return r.getChannel(ctx, b, labels.SelectorFromSet(broker.TriggerChannelLabels(b.Name)))
-}
-
-// getBrokerIngressChannel return the Broker's Ingress Channel if it exists, otherwise it returns an
-// error.
-func (r *Reconciler) getBrokerIngressChannel(ctx context.Context, b *v1alpha1.Broker) (*v1alpha1.Channel, error) {
-	return r.getChannel(ctx, b, labels.SelectorFromSet(broker.IngressChannelLabels(b.Name)))
-}
-
-// getChannel returns the Broker's channel based on the provided label selector if it exists, otherwise it returns an error.
-func (r *Reconciler) getChannel(ctx context.Context, b *v1alpha1.Broker, ls labels.Selector) (*v1alpha1.Channel, error) {
-	channels, err := r.channelLister.Channels(b.Namespace).List(ls)
+// labelNamespace will label namespace with knative-eventing-injection=enabled
+func (r *Reconciler) labelNamespace(ctx context.Context, t *v1alpha1.Trigger) error {
+	current, err := r.namespaceLister.Get(t.Namespace)
 	if err != nil {
-		return nil, err
+		t.Status.MarkBrokerFailed("NamespaceGetFailed", "Failed to get namespace resource to enable knative-eventing-injection")
+		return err
 	}
-
-	// TODO: If there's more than one, should that be treated as an error. This seems a bit wonky
-	// but that's how it was before.
-	for _, c := range channels {
-		if metav1.IsControlledBy(c, b) {
-			return c, nil
-		}
+	current = current.DeepCopy()
+	if current.Labels == nil {
+		current.Labels = map[string]string{}
 	}
-	return nil, apierrs.NewNotFound(schema.GroupResource{}, "")
+	current.Labels["knative-eventing-injection"] = "enabled"
+	if _, err = r.KubeClientSet.CoreV1().Namespaces().Update(current); err != nil {
+		t.Status.MarkBrokerFailed("NamespaceUpdateFailed", "Failed to label the namespace resource with knative-eventing-injection")
+		return err
+	}
+	return nil
 }
 
 // getBrokerFilterService returns the K8s service for trigger 't' if exists,
 // otherwise it returns an error.
 func (r *Reconciler) getBrokerFilterService(ctx context.Context, b *v1alpha1.Broker) (*corev1.Service, error) {
-	services, err := r.serviceLister.Services(b.Namespace).List(labels.SelectorFromSet(brokerresources.FilterLabels(b.Name)))
-	if err != nil {
-		return nil, err
-	}
-	for _, svc := range services {
-		if metav1.IsControlledBy(svc, b) {
-			return svc, nil
-		}
-	}
-
-	return nil, apierrs.NewNotFound(schema.GroupResource{}, "")
+	svcName := brokerresources.MakeFilterService(b).Name
+	return r.serviceLister.Services(b.Namespace).Get(svcName)
 }
 
 // subscribeToBrokerChannel subscribes service 'svc' to the Broker's channels.
-func (r *Reconciler) subscribeToBrokerChannel(ctx context.Context, t *v1alpha1.Trigger, brokerTrigger, brokerIngress *v1alpha1.Channel, svc *corev1.Service) (*v1alpha1.Subscription, error) {
+func (r *Reconciler) subscribeToBrokerChannel(ctx context.Context, t *v1alpha1.Trigger, brokerTrigger, brokerIngress *corev1.ObjectReference, svc *corev1.Service) (*messagingv1alpha1.Subscription, error) {
 	uri := &url.URL{
 		Scheme: "http",
 		Host:   names.ServiceHostName(svc.Name, svc.Namespace),
@@ -356,61 +363,52 @@ func (r *Reconciler) subscribeToBrokerChannel(ctx context.Context, t *v1alpha1.T
 	}
 	expected := resources.NewSubscription(t, brokerTrigger, brokerIngress, uri)
 
-	sub, err := r.getSubscription(ctx, t)
-
+	sub, err := r.subscriptionLister.Subscriptions(t.Namespace).Get(expected.Name)
 	// If the resource doesn't exist, we'll create it.
 	if apierrs.IsNotFound(err) {
-		sub = expected
 		logging.FromContext(ctx).Info("Creating subscription")
-		newSub, err := r.EventingClientSet.EventingV1alpha1().Subscriptions(sub.Namespace).Create(sub)
+		sub, err = r.EventingClientSet.MessagingV1alpha1().Subscriptions(t.Namespace).Create(expected)
 		if err != nil {
 			r.Recorder.Eventf(t, corev1.EventTypeWarning, subscriptionCreateFailed, "Create Trigger's subscription failed: %v", err)
 			return nil, err
 		}
-		return newSub, nil
+		return sub, nil
 	} else if err != nil {
 		logging.FromContext(ctx).Error("Failed to get subscription", zap.Error(err))
-		r.Recorder.Eventf(t, corev1.EventTypeWarning, subscriptionCreateFailed, "Create Trigger's subscription failed: %v", err)
+		r.Recorder.Eventf(t, corev1.EventTypeWarning, subscriptionGetFailed, "Getting the Trigger's Subscription failed: %v", err)
 		return nil, err
-	}
-
-	// Update Subscription if it has changed. Ignore the generation.
-	expected.Spec.DeprecatedGeneration = sub.Spec.DeprecatedGeneration
-	if !equality.Semantic.DeepDerivative(expected.Spec, sub.Spec) {
-		// Given that spec.channel is immutable, we cannot just update the Subscription. We delete
-		// it and re-create it instead.
-		logging.FromContext(ctx).Info("Deleting subscription", zap.String("namespace", sub.Namespace), zap.String("name", sub.Name))
-		err = r.EventingClientSet.EventingV1alpha1().Subscriptions(sub.Namespace).Delete(sub.Name, &metav1.DeleteOptions{})
-		if err != nil {
-			logging.FromContext(ctx).Info("Cannot delete subscription", zap.Error(err))
-			r.Recorder.Eventf(t, corev1.EventTypeWarning, subscriptionDeleteFailed, "Delete Trigger's subscription failed: %v", err)
-			return nil, err
-		}
-		sub = expected
-		logging.FromContext(ctx).Info("Creating subscription")
-		newSub, err := r.EventingClientSet.EventingV1alpha1().Subscriptions(sub.Namespace).Create(sub)
-		if err != nil {
-			logging.FromContext(ctx).Info("Cannot create subscription", zap.Error(err))
-			r.Recorder.Eventf(t, corev1.EventTypeWarning, subscriptionCreateFailed, "Create Trigger's subscription failed: %v", err)
-			return nil, err
-		}
-		return newSub, nil
+	} else if !metav1.IsControlledBy(sub, t) {
+		t.Status.MarkSubscriptionNotOwned(sub)
+		return nil, fmt.Errorf("trigger %q does not own subscription %q", t.Name, sub.Name)
+	} else if sub, err = r.reconcileSubscription(ctx, t, expected, sub); err != nil {
+		// TODO Add logging
+		return nil, err
 	}
 	return sub, nil
 }
 
-// getSubscription returns the subscription of trigger 't' if exists,
-// otherwise it returns an error.
-func (r *Reconciler) getSubscription(ctx context.Context, t *v1alpha1.Trigger) (*v1alpha1.Subscription, error) {
-	subs, err := r.subscriptionLister.Subscriptions(t.Namespace).List(labels.SelectorFromSet(resources.SubscriptionLabels(t)))
-	if err != nil {
-		return nil, err
-	}
-	for _, s := range subs {
-		if metav1.IsControlledBy(s, t) {
-			return s, nil
-		}
+func (r *Reconciler) reconcileSubscription(ctx context.Context, t *v1alpha1.Trigger, expected, actual *messagingv1alpha1.Subscription) (*messagingv1alpha1.Subscription, error) {
+	// Update Subscription if it has changed. Ignore the generation.
+	expected.Spec.DeprecatedGeneration = actual.Spec.DeprecatedGeneration
+	if equality.Semantic.DeepDerivative(expected.Spec, actual.Spec) {
+		return actual, nil
 	}
 
-	return nil, apierrs.NewNotFound(schema.GroupResource{}, "")
+	// Given that spec.channel is immutable, we cannot just update the Subscription. We delete
+	// it and re-create it instead.
+	logging.FromContext(ctx).Info("Deleting subscription", zap.String("namespace", actual.Namespace), zap.String("name", actual.Name))
+	err := r.EventingClientSet.MessagingV1alpha1().Subscriptions(t.Namespace).Delete(actual.Name, &metav1.DeleteOptions{})
+	if err != nil {
+		logging.FromContext(ctx).Info("Cannot delete subscription", zap.Error(err))
+		r.Recorder.Eventf(t, corev1.EventTypeWarning, subscriptionDeleteFailed, "Delete Trigger's subscription failed: %v", err)
+		return nil, err
+	}
+	logging.FromContext(ctx).Info("Creating subscription")
+	newSub, err := r.EventingClientSet.MessagingV1alpha1().Subscriptions(t.Namespace).Create(expected)
+	if err != nil {
+		logging.FromContext(ctx).Info("Cannot create subscription", zap.Error(err))
+		r.Recorder.Eventf(t, corev1.EventTypeWarning, subscriptionCreateFailed, "Create Trigger's subscription failed: %v", err)
+		return nil, err
+	}
+	return newSub, nil
 }

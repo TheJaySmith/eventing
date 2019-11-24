@@ -1,5 +1,6 @@
 /*
 Copyright 2018 The Knative Authors
+
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -16,100 +17,143 @@ limitations under the License.
 package main
 
 import (
-	"flag"
-	"log"
-
-	"github.com/knative/eventing/pkg/channeldefaulter"
-
-	"go.uber.org/zap"
-
-	"github.com/knative/pkg/configmap"
-	"github.com/knative/pkg/logging"
-	"github.com/knative/pkg/logging/logkey"
-	"github.com/knative/pkg/signals"
-	"github.com/knative/pkg/webhook"
-
-	eventingv1alpha1 "github.com/knative/eventing/pkg/apis/eventing/v1alpha1"
-	"github.com/knative/eventing/pkg/logconfig"
-	"github.com/knative/pkg/system"
+	"context"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+	eventingduckv1alpha1 "knative.dev/eventing/pkg/apis/duck/v1alpha1"
+	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	flowsv1alpha1 "knative.dev/eventing/pkg/apis/flows/v1alpha1"
+	messagingv1alpha1 "knative.dev/eventing/pkg/apis/messaging/v1alpha1"
+	sourcesv1alpha1 "knative.dev/eventing/pkg/apis/sources/v1alpha1"
+	"knative.dev/eventing/pkg/defaultchannel"
+	"knative.dev/eventing/pkg/logconfig"
+	"knative.dev/pkg/configmap"
+	"knative.dev/pkg/controller"
+	"knative.dev/pkg/injection/sharedmain"
+	"knative.dev/pkg/logging"
+	"knative.dev/pkg/signals"
+	tracingconfig "knative.dev/pkg/tracing/config"
+	"knative.dev/pkg/webhook"
+	"knative.dev/pkg/webhook/certificates"
+	"knative.dev/pkg/webhook/configmaps"
+	"knative.dev/pkg/webhook/resourcesemantics"
+	"knative.dev/pkg/webhook/resourcesemantics/defaulting"
+	"knative.dev/pkg/webhook/resourcesemantics/validation"
 )
 
-func main() {
-	flag.Parse()
-	// Read the logging config and setup a logger.
-	cm, err := configmap.Load("/etc/config-logging")
-	if err != nil {
-		log.Fatalf("Error loading logging configuration: %v", err)
-	}
-	config, err := logging.NewConfigFromMap(cm, logconfig.WebhookName())
-	if err != nil {
-		log.Fatalf("Error parsing logging configuration: %v", err)
-	}
-	logger, atomicLevel := logging.NewLoggerFromConfig(config, logconfig.WebhookName())
-	defer logger.Sync()
-	logger = logger.With(zap.String(logkey.ControllerType, logconfig.WebhookName()))
+var types = map[schema.GroupVersionKind]resourcesemantics.GenericCRD{
+	// For group eventing.knative.dev.
+	eventingv1alpha1.SchemeGroupVersion.WithKind("Broker"):    &eventingv1alpha1.Broker{},
+	eventingv1alpha1.SchemeGroupVersion.WithKind("Trigger"):   &eventingv1alpha1.Trigger{},
+	eventingv1alpha1.SchemeGroupVersion.WithKind("EventType"): &eventingv1alpha1.EventType{},
 
-	logger.Infow("Starting the Eventing Webhook")
+	// For group messaging.knative.dev.
+	messagingv1alpha1.SchemeGroupVersion.WithKind("InMemoryChannel"): &messagingv1alpha1.InMemoryChannel{},
+	messagingv1alpha1.SchemeGroupVersion.WithKind("Sequence"):        &messagingv1alpha1.Sequence{},
+	messagingv1alpha1.SchemeGroupVersion.WithKind("Parallel"):        &messagingv1alpha1.Parallel{},
+	messagingv1alpha1.SchemeGroupVersion.WithKind("Channel"):         &messagingv1alpha1.Channel{},
+	messagingv1alpha1.SchemeGroupVersion.WithKind("Subscription"):    &messagingv1alpha1.Subscription{},
 
-	// set up signals so we handle the first shutdown signal gracefully
-	stopCh := signals.SetupSignalHandler()
+	// For group sources.eventing.knative.dev.
+	sourcesv1alpha1.SchemeGroupVersion.WithKind("ApiServerSource"): &sourcesv1alpha1.ApiServerSource{},
+	sourcesv1alpha1.SchemeGroupVersion.WithKind("ContainerSource"): &sourcesv1alpha1.ContainerSource{},
+	sourcesv1alpha1.SchemeGroupVersion.WithKind("CronJobSource"):   &sourcesv1alpha1.CronJobSource{},
 
-	clusterConfig, err := rest.InClusterConfig()
-	if err != nil {
-		logger.Fatalw("Failed to get in cluster config", zap.Error(err))
-	}
+	// For group flows.knative.dev
+	flowsv1alpha1.SchemeGroupVersion.WithKind("Parallel"): &flowsv1alpha1.Parallel{},
+	flowsv1alpha1.SchemeGroupVersion.WithKind("Sequence"): &flowsv1alpha1.Sequence{},
+}
 
-	kubeClient, err := kubernetes.NewForConfig(clusterConfig)
-	if err != nil {
-		logger.Fatalw("Failed to get the client set", zap.Error(err))
-	}
+func NewDefaultingAdmissionController(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
+	logger := logging.FromContext(ctx)
 
-	// Watch the logging config map and dynamically update logging levels.
-	configMapWatcher := configmap.NewInformedWatcher(kubeClient, system.Namespace())
-
-	configMapWatcher.Watch(logconfig.ConfigMapName(), logging.UpdateLevelFromConfigMap(logger, atomicLevel, logconfig.WebhookName(), logconfig.WebhookName()))
-
-	// Watch the default-channel-webhook ConfigMap and dynamically update the default
-	// ClusterChannelProvisioner.
-	channelDefaulter := channeldefaulter.New(logger.Desugar())
-	eventingv1alpha1.ChannelDefaulterSingleton = channelDefaulter
-	configMapWatcher.Watch(channeldefaulter.ConfigMapName, channelDefaulter.UpdateConfigMap)
-
-	if err = configMapWatcher.Start(stopCh); err != nil {
-		logger.Fatalf("failed to start webhook configmap watcher: %v", err)
+	// Decorate contexts with the current state of the config.
+	ctxFunc := func(ctx context.Context) context.Context {
+		return ctx
 	}
 
-	options := webhook.ControllerOptions{
-		ServiceName:    logconfig.WebhookName(),
-		DeploymentName: logconfig.WebhookName(),
-		Namespace:      system.Namespace(),
-		Port:           8443,
-		SecretName:     "webhook-certs",
-		WebhookName:    "webhook.eventing.knative.dev",
-	}
-	controller := webhook.AdmissionController{
-		Client:  kubeClient,
-		Options: options,
-		Handlers: map[schema.GroupVersionKind]webhook.GenericCRD{
-			// For group eventing.knative.dev,
-			eventingv1alpha1.SchemeGroupVersion.WithKind("Broker"):                    &eventingv1alpha1.Broker{},
-			eventingv1alpha1.SchemeGroupVersion.WithKind("Channel"):                   &eventingv1alpha1.Channel{},
-			eventingv1alpha1.SchemeGroupVersion.WithKind("ClusterChannelProvisioner"): &eventingv1alpha1.ClusterChannelProvisioner{},
-			eventingv1alpha1.SchemeGroupVersion.WithKind("Subscription"):              &eventingv1alpha1.Subscription{},
-			eventingv1alpha1.SchemeGroupVersion.WithKind("Trigger"):                   &eventingv1alpha1.Trigger{},
-			eventingv1alpha1.SchemeGroupVersion.WithKind("EventType"):                 &eventingv1alpha1.EventType{},
+	// Watch the default-ch-webhook ConfigMap and dynamically update the default
+	// Channel CRD.
+	// TODO(#2128): This should be persisted to context in the context function
+	// above and fetched off of context by the api code.  See knative/serving's logic
+	// around config-defaults for an example of this.
+	chDefaulter := defaultchannel.New(logger.Desugar())
+	eventingduckv1alpha1.ChannelDefaulterSingleton = chDefaulter
+	cmw.Watch(defaultchannel.ConfigMapName, chDefaulter.UpdateConfigMap)
+
+	return defaulting.NewAdmissionController(ctx,
+
+		// Name of the resource webhook.
+		"defaulting.webhook.eventing.knative.dev",
+
+		// The path on which to serve the webhook.
+		"/defaulting",
+
+		// The resources to validate and default.
+		types,
+
+		// A function that infuses the context passed to Validate/SetDefaults with custom metadata.
+		ctxFunc,
+
+		// Whether to disallow unknown fields.
+		true,
+	)
+}
+
+func NewValidationAdmissionController(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
+	return validation.NewAdmissionController(ctx,
+
+		// Name of the resource webhook.
+		"validation.webhook.eventing.knative.dev",
+
+		// The path on which to serve the webhook.
+		"/validation",
+
+		// The resources to validate and default.
+		types,
+
+		// A function that infuses the context passed to Validate/SetDefaults with custom metadata.
+		func(ctx context.Context) context.Context {
+			// return v1.WithUpgradeViaDefaulting(store.ToContext(ctx))
+			return ctx
 		},
-		Logger: logger,
-	}
-	if err != nil {
-		logger.Fatalw("Failed to create the admission controller", zap.Error(err))
-	}
-	if err = controller.Run(stopCh); err != nil {
-		logger.Errorw("controller.Run() failed", zap.Error(err))
-	}
-	logger.Infow("Webhook stopping")
+
+		// Whether to disallow unknown fields.
+		true,
+	)
+}
+
+func NewConfigValidationController(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
+	return configmaps.NewAdmissionController(ctx,
+
+		// Name of the configmap webhook.
+		"config.webhook.eventing.knative.dev",
+
+		// The path on which to serve the webhook.
+		"/config-validation",
+
+		// The configmaps to validate.
+		configmap.Constructors{
+			tracingconfig.ConfigName: tracingconfig.NewTracingConfigFromConfigMap,
+			// metrics.ConfigMapName():   metricsconfig.NewObservabilityConfigFromConfigMap,
+			logging.ConfigMapName(): logging.NewConfigFromConfigMap,
+		},
+	)
+}
+
+func main() {
+	// Set up a signal context with our webhook options
+	ctx := webhook.WithOptions(signals.NewContext(), webhook.Options{
+		ServiceName: logconfig.WebhookName(),
+		Port:        8443,
+		// SecretName must match the name of the Secret created in the configuration.
+		SecretName: "eventing-webhook-certs",
+	})
+
+	sharedmain.MainWithContext(ctx, logconfig.WebhookName(),
+		certificates.NewController,
+		NewConfigValidationController,
+		NewValidationAdmissionController,
+		NewDefaultingAdmissionController,
+	)
 }

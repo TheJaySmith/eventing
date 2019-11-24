@@ -19,21 +19,15 @@ limitations under the License.
 package v1alpha1
 
 import (
-	internalinterfaces "github.com/knative/eventing/pkg/client/informers/externalversions/internalinterfaces"
+	internalinterfaces "knative.dev/eventing/pkg/client/informers/externalversions/internalinterfaces"
 )
 
 // Interface provides access to all the informers in this group version.
 type Interface interface {
 	// Brokers returns a BrokerInformer.
 	Brokers() BrokerInformer
-	// Channels returns a ChannelInformer.
-	Channels() ChannelInformer
-	// ClusterChannelProvisioners returns a ClusterChannelProvisionerInformer.
-	ClusterChannelProvisioners() ClusterChannelProvisionerInformer
 	// EventTypes returns a EventTypeInformer.
 	EventTypes() EventTypeInformer
-	// Subscriptions returns a SubscriptionInformer.
-	Subscriptions() SubscriptionInformer
 	// Triggers returns a TriggerInformer.
 	Triggers() TriggerInformer
 }
@@ -54,24 +48,9 @@ func (v *version) Brokers() BrokerInformer {
 	return &brokerInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
-// Channels returns a ChannelInformer.
-func (v *version) Channels() ChannelInformer {
-	return &channelInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
-}
-
-// ClusterChannelProvisioners returns a ClusterChannelProvisionerInformer.
-func (v *version) ClusterChannelProvisioners() ClusterChannelProvisionerInformer {
-	return &clusterChannelProvisionerInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
-}
-
 // EventTypes returns a EventTypeInformer.
 func (v *version) EventTypes() EventTypeInformer {
 	return &eventTypeInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
-}
-
-// Subscriptions returns a SubscriptionInformer.
-func (v *version) Subscriptions() SubscriptionInformer {
-	return &subscriptionInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // Triggers returns a TriggerInformer.

@@ -16,12 +16,14 @@ apiVersion: v1
 kind: Service
 metadata:
   labels:
-    role: webhook
-  name: webhook
+    eventing.knative.dev/release: devel
+    role: eventing-webhook
+  name: eventing-webhook
   namespace: knative-eventing
 spec:
   ports:
-    - port: 443
+    - name: https-webhook
+      port: 443
       targetPort: 8443
   selector:
-    role: webhook
+    role: eventing-webhook

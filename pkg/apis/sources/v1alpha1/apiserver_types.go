@@ -17,18 +17,18 @@ limitations under the License.
 package v1alpha1
 
 import (
-	duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
-	"github.com/knative/pkg/kmeta"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"knative.dev/pkg/apis"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
+	duckv1beta1 "knative.dev/pkg/apis/duck/v1beta1"
+	"knative.dev/pkg/kmeta"
 )
 
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // ApiServerSource is the Schema for the apiserversources API
-// +k8s:openapi-gen=true
 type ApiServerSource struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -37,8 +37,13 @@ type ApiServerSource struct {
 	Status ApiServerSourceStatus `json:"status,omitempty"`
 }
 
-// Check that we can create OwnerReferences to a Configuration.
-var _ kmeta.OwnerRefable = (*ApiServerSource)(nil)
+var (
+	// Check that we can create OwnerReferences to an ApiServerSource.
+	_ kmeta.OwnerRefable = (*ApiServerSource)(nil)
+
+	// Check that ApiServerSource can return its spec untyped.
+	_ apis.HasSpec = (*ApiServerSource)(nil)
+)
 
 const (
 	// ApiServerSourceAddEventType is the ApiServerSource CloudEvent type for adds.
@@ -82,7 +87,7 @@ type ApiServerSourceSpec struct {
 
 	// Sink is a reference to an object that will resolve to a domain name to use as the sink.
 	// +optional
-	Sink *corev1.ObjectReference `json:"sink,omitempty"`
+	Sink *duckv1beta1.Destination `json:"sink,omitempty"`
 
 	// Mode is the mode the receive adapter controller runs under: Ref or Resource.
 	// `Ref` sends only the reference to the resource.
@@ -92,10 +97,10 @@ type ApiServerSourceSpec struct {
 
 // ApiServerSourceStatus defines the observed state of ApiServerSource
 type ApiServerSourceStatus struct {
-	// inherits duck/v1alpha1 Status, which currently provides:
+	// inherits duck/v1 Status, which currently provides:
 	// * ObservedGeneration - the 'Generation' of the Service that was last processed by the controller.
 	// * Conditions - the latest available observations of a resource's current state.
-	duckv1alpha1.Status `json:",inline"`
+	duckv1.Status `json:",inline"`
 
 	// SinkURI is the current active sink URI that has been configured for the ApiServerSource.
 	// +optional
@@ -108,9 +113,22 @@ type ApiServerResource struct {
 	APIVersion string `json:"apiVersion"`
 
 	// Kind of the resource to watch.
-	// More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#types-kinds
+	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
 	Kind string `json:"kind"`
+
+	// LabelSelector restricts this source to objects with the selected labels
+	// More info: http://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors
+	LabelSelector metav1.LabelSelector `json:"labelSelector"`
+
+	// ControllerSelector restricts this source to objects with a controlling owner reference of the specified kind.
+	// Only apiVersion and kind are used. Both are optional.
+	ControllerSelector metav1.OwnerReference `json:"controllerSelector"`
 
 	// If true, send an event referencing the object controlling the resource
 	Controller bool `json:"controller"`
+}
+
+// GetUntypedSpec returns the spec of the ApiServerSource.
+func (a *ApiServerSource) GetUntypedSpec() interface{} {
+	return a.Spec
 }

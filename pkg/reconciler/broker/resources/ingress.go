@@ -19,14 +19,19 @@ package resources
 import (
 	"fmt"
 
-	"github.com/knative/pkg/kmeta"
+	"knative.dev/pkg/kmeta"
+	"knative.dev/pkg/system"
 
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	eventingv1alpha1 "github.com/knative/eventing/pkg/apis/eventing/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+)
+
+const (
+	ingressContainerName = "ingress"
 )
 
 // IngressArgs are the arguments to create a Broker's ingress Deployment.
@@ -61,8 +66,42 @@ func MakeIngress(args *IngressArgs) *appsv1.Deployment {
 					Containers: []corev1.Container{
 						{
 							Image: args.Image,
-							Name:  "ingress",
+							Name:  ingressContainerName,
+							LivenessProbe: &corev1.Probe{
+								Handler: corev1.Handler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: "/healthz",
+										Port: intstr.IntOrString{Type: intstr.Int, IntVal: 8080},
+									},
+								},
+								InitialDelaySeconds: 5,
+								PeriodSeconds:       2,
+							},
 							Env: []corev1.EnvVar{
+								{
+									Name:  system.NamespaceEnvKey,
+									Value: system.Namespace(),
+								},
+								{
+									Name: "NAMESPACE",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "metadata.namespace",
+										},
+									},
+								},
+								{
+									Name: "POD_NAME",
+									ValueFrom: &corev1.EnvVarSource{
+										FieldRef: &corev1.ObjectFieldSelector{
+											FieldPath: "metadata.name",
+										},
+									},
+								},
+								{
+									Name:  "CONTAINER_NAME",
+									Value: ingressContainerName,
+								},
 								{
 									Name:  "FILTER",
 									Value: "", // TODO Add one.
@@ -74,6 +113,11 @@ func MakeIngress(args *IngressArgs) *appsv1.Deployment {
 								{
 									Name:  "BROKER",
 									Value: args.Broker.Name,
+								},
+								// Used for StackDriver only.
+								{
+									Name:  "METRICS_DOMAIN",
+									Value: "knative.dev/internal/eventing",
 								},
 							},
 							Ports: []corev1.ContainerPort{
@@ -115,7 +159,7 @@ func MakeIngressService(b *eventingv1alpha1.Broker) *corev1.Service {
 					TargetPort: intstr.FromInt(8080),
 				},
 				{
-					Name: "metrics",
+					Name: "http-metrics",
 					Port: 9090,
 				},
 			},

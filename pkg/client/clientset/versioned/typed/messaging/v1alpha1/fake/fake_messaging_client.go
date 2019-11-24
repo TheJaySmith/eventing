@@ -19,17 +19,33 @@ limitations under the License.
 package fake
 
 import (
-	v1alpha1 "github.com/knative/eventing/pkg/client/clientset/versioned/typed/messaging/v1alpha1"
 	rest "k8s.io/client-go/rest"
 	testing "k8s.io/client-go/testing"
+	v1alpha1 "knative.dev/eventing/pkg/client/clientset/versioned/typed/messaging/v1alpha1"
 )
 
 type FakeMessagingV1alpha1 struct {
 	*testing.Fake
 }
 
+func (c *FakeMessagingV1alpha1) Channels(namespace string) v1alpha1.ChannelInterface {
+	return &FakeChannels{c, namespace}
+}
+
 func (c *FakeMessagingV1alpha1) InMemoryChannels(namespace string) v1alpha1.InMemoryChannelInterface {
 	return &FakeInMemoryChannels{c, namespace}
+}
+
+func (c *FakeMessagingV1alpha1) Parallels(namespace string) v1alpha1.ParallelInterface {
+	return &FakeParallels{c, namespace}
+}
+
+func (c *FakeMessagingV1alpha1) Sequences(namespace string) v1alpha1.SequenceInterface {
+	return &FakeSequences{c, namespace}
+}
+
+func (c *FakeMessagingV1alpha1) Subscriptions(namespace string) v1alpha1.SubscriptionInterface {
+	return &FakeSubscriptions{c, namespace}
 }
 
 // RESTClient returns a RESTClient that is used to communicate

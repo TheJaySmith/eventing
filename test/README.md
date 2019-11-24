@@ -77,38 +77,34 @@ environment that meets
 [the e2e test environment requirements](#environment-requirements), and you need
 to specify the build tag `e2e`.
 
+If you are using a private registry that will require authentication then you'll
+need to create a Secret in your `default` Namespace called
+`kn-eventing-test-pull-secret` with the Docker login credentials. This Secret
+will then be copied into any new Namespace that is created by the testing
+infrastructure, and linked to any ServiceAccount created as a imagePulLSecret.
+Note: some tests will use the `knative-eventing-injection` label to
+automatically create new ServiceAccounts in some Namespaces, this feature does
+not yet support private registries. See
+https://github.com/knative/eventing/issues/1862 for status of this issue.
+
 ```bash
-go test -v -tags=e2e -count=1 ./test/e2e -run ^TestMain$ -runFromMain=true
+go test -v -tags=e2e -count=1 ./test/e2e
 ```
 
-By default, it will run all tests configured for the default
-`ClusterChannelProvisioner` in `main_test.go`.
-
-If you want to run tests against other `ClusterChannelProvisioners`, you can
-specify them through `-clusterChannelProvisioners`.
+By default, tests run against images with the `latest` tag. To override this
+bevavior you can specify a different tag through `-tag`:
 
 ```bash
-go test -v -tags=e2e -count=1 ./test/e2e -run ^TestMain$ -runFromMain=true -clusterChannelProvisioners=in-memory,gcp-pubsub
+go test -v -tags=e2e -count=1 ./test/e2e -tag e2e
 ```
 
 #### One test case
 
-To run one e2e test case, e.g. `TestSingleBinaryEvents`, use
+To run one e2e test case, e.g. `TestSingleBinaryEventForChannel`, use
 [the `-run` flag with `go test`](https://golang.org/cmd/go/#hdr-Testing_flags):
 
 ```bash
-go test -v -tags=e2e -count=1 ./test/e2e -run ^TestSingleBinaryEvent$
-```
-
-By default, it will run the test against the default
-`ClusterChannelProvisioner`.
-
-If you want to run it against another `ClusterChannelProvisioner`, you can
-specify it through `-clusterChannelProvisioners`. Note that you can only specify
-one `ClusterChannelProvisioner` if you are not running from `TestMain`.
-
-```bash
-go test -v -tags=e2e -count=1 ./test/e2e -run ^TestSingleBinaryEvent$ -clusterChannelProvisioners=in-memory
+go test -v -tags=e2e -count=1 ./test/e2e -run ^TestSingleBinaryEventForChannel$
 ```
 
 ## Environment requirements
@@ -138,11 +134,15 @@ build and push the test images used by the e2e tests. It requires:
 To run the script for all end to end test images:
 
 ```bash
-./test/upload-test-images.sh e2e
+./test/upload-test-images.sh
 ```
 
-A docker tag is mandatory to avoid issues with using `latest` tag for images
-deployed in GCR.
+For images deployed in GCR, a docker tag is mandatory to avoid issues with using
+`latest` tag:
+
+```bash
+./test/upload-test-images.sh e2e
+```
 
 ### Adding new test images
 
@@ -155,4 +155,4 @@ uploading test images, `ko` will build an image from this folder.
 ## Flags
 
 Flags are similar to those in
-[`Knative Serving`](https://github.com/knative/serving/blob/master/test/README.md#flags-1)
+[`Knative Serving`](https://github.com/knative/serving/blob/master/test/README.md#flags-1).

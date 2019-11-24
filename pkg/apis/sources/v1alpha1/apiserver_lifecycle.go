@@ -17,40 +17,39 @@ limitations under the License.
 package v1alpha1
 
 import (
-	duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+
+	"knative.dev/pkg/apis"
+
+	"knative.dev/eventing/pkg/apis/duck"
 )
 
 const (
 	// ApiServerConditionReady has status True when the ApiServerSource is ready to send events.
-	ApiServerConditionReady = duckv1alpha1.ConditionReady
+	ApiServerConditionReady = apis.ConditionReady
 
 	// ApiServerConditionSinkProvided has status True when the ApiServerSource has been configured with a sink target.
-	ApiServerConditionSinkProvided duckv1alpha1.ConditionType = "SinkProvided"
+	ApiServerConditionSinkProvided apis.ConditionType = "SinkProvided"
 
 	// ApiServerConditionDeployed has status True when the ApiServerSource has had it's deployment created.
-	ApiServerConditionDeployed duckv1alpha1.ConditionType = "Deployed"
+	ApiServerConditionDeployed apis.ConditionType = "Deployed"
+
+	// ApiServerConditionSufficientPermissions has status True when the ApiServerSource has sufficient permissions to access resources.
+	ApiServerConditionSufficientPermissions apis.ConditionType = "SufficientPermissions"
 
 	// ApiServerConditionEventTypeProvided has status True when the ApiServerSource has been configured with its event types.
-	ApiServerConditionEventTypeProvided duckv1alpha1.ConditionType = "EventTypesProvided"
+	ApiServerConditionEventTypeProvided apis.ConditionType = "EventTypesProvided"
 )
 
-var apiserverCondSet = duckv1alpha1.NewLivingConditionSet(
+var apiserverCondSet = apis.NewLivingConditionSet(
 	ApiServerConditionSinkProvided,
 	ApiServerConditionDeployed,
+	ApiServerConditionSufficientPermissions,
 )
 
-// GetConditions returns Conditions
-func (s *ApiServerSourceStatus) GetConditions() duckv1alpha1.Conditions {
-	return s.Conditions
-}
-
-// SetConditions sets Conditions
-func (s *ApiServerSourceStatus) SetConditions(conditions duckv1alpha1.Conditions) {
-	s.Conditions = conditions
-}
-
 // GetCondition returns the condition currently associated with the given type, or nil.
-func (s *ApiServerSourceStatus) GetCondition(t duckv1alpha1.ConditionType) *duckv1alpha1.Condition {
+func (s *ApiServerSourceStatus) GetCondition(t apis.ConditionType) *apis.Condition {
 	return apiserverCondSet.Manage(s).GetCondition(t)
 }
 
@@ -69,14 +68,37 @@ func (s *ApiServerSourceStatus) MarkSink(uri string) {
 	}
 }
 
+// MarkSinkWarnDeprecated sets the condition that the source has a sink configured and warns ref is deprecated.
+func (s *ApiServerSourceStatus) MarkSinkWarnRefDeprecated(uri string) {
+	s.SinkURI = uri
+	if len(uri) > 0 {
+		c := apis.Condition{
+			Type:     ApiServerConditionSinkProvided,
+			Status:   corev1.ConditionTrue,
+			Severity: apis.ConditionSeverityError,
+			Message:  "Using deprecated object ref fields when specifying spec.sink. Update to spec.sink.ref. These will be removed in the future.",
+		}
+		apiserverCondSet.Manage(s).SetCondition(c)
+	} else {
+		apiserverCondSet.Manage(s).MarkUnknown(ApiServerConditionSinkProvided, "SinkEmpty", "Sink has resolved to empty.%s", "")
+	}
+}
+
 // MarkNoSink sets the condition that the source does not have a sink configured.
 func (s *ApiServerSourceStatus) MarkNoSink(reason, messageFormat string, messageA ...interface{}) {
 	apiserverCondSet.Manage(s).MarkFalse(ApiServerConditionSinkProvided, reason, messageFormat, messageA...)
 }
 
-// MarkDeployed sets the condition that the source has been deployed.
-func (s *ApiServerSourceStatus) MarkDeployed() {
-	apiserverCondSet.Manage(s).MarkTrue(ApiServerConditionDeployed)
+// PropagateDeploymentAvailability uses the availability of the provided Deployment to determine if
+// ApiServerConditionDeployed should be marked as true or false.
+func (s *ApiServerSourceStatus) PropagateDeploymentAvailability(d *appsv1.Deployment) {
+	if duck.DeploymentIsAvailable(&d.Status, false) {
+		apiserverCondSet.Manage(s).MarkTrue(ApiServerConditionDeployed)
+	} else {
+		// I don't know how to propagate the status well, so just give the name of the Deployment
+		// for now.
+		apiserverCondSet.Manage(s).MarkFalse(ApiServerConditionDeployed, "DeploymentUnavailable", "The Deployment '%s' is unavailable.", d.Name)
+	}
 }
 
 // MarkEventTypes sets the condition that the source has set its event type.
@@ -87,6 +109,16 @@ func (s *ApiServerSourceStatus) MarkEventTypes() {
 // MarkNoEventTypes sets the condition that the source does not its event type configured.
 func (s *ApiServerSourceStatus) MarkNoEventTypes(reason, messageFormat string, messageA ...interface{}) {
 	apiserverCondSet.Manage(s).MarkFalse(ApiServerConditionEventTypeProvided, reason, messageFormat, messageA...)
+}
+
+// MarkSufficientPermissions sets the condition that the source has enough permissions to access the resources.
+func (s *ApiServerSourceStatus) MarkSufficientPermissions() {
+	apiserverCondSet.Manage(s).MarkTrue(ApiServerConditionSufficientPermissions)
+}
+
+// MarkNoSufficientPermissions sets the condition that the source does not have enough permissions to access the resources
+func (s *ApiServerSourceStatus) MarkNoSufficientPermissions(reason, messageFormat string, messageA ...interface{}) {
+	apiserverCondSet.Manage(s).MarkFalse(ApiServerConditionSufficientPermissions, reason, messageFormat, messageA...)
 }
 
 // IsReady returns true if the resource is ready overall.

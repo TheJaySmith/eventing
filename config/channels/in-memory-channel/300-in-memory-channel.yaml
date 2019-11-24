@@ -16,10 +16,16 @@ kind: CustomResourceDefinition
 metadata:
  name: inmemorychannels.messaging.knative.dev
  labels:
+    eventing.knative.dev/release: devel
     knative.dev/crd-install: "true"
+    messaging.knative.dev/subscribable: "true"
+    duck.knative.dev/addressable: "true"
 spec:
   group: messaging.knative.dev
-  version: v1alpha1
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
   names:
     kind: InMemoryChannel
     plural: inmemorychannels
@@ -28,6 +34,7 @@ spec:
     - all
     - knative
     - messaging
+    - channel
     shortNames:
     - imc
   scope: Namespaced
@@ -40,9 +47,9 @@ spec:
     - name: Reason
       type: string
       JSONPath: ".status.conditions[?(@.type==\"Ready\")].reason"
-    - name: Hostname
+    - name: URL
       type: string
-      JSONPath: .status.address.hostname
+      JSONPath: .status.address.url
     - name: Age
       type: date
       JSONPath: .metadata.creationTimestamp
@@ -89,3 +96,6 @@ spec:
                       replyURI:
                         type: string
                         minLength: 1
+                      deliveryURI:
+                        type: string
+

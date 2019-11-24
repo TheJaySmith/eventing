@@ -17,18 +17,18 @@ limitations under the License.
 package duck
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/dynamic/fake"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
-
-	"github.com/knative/eventing/pkg/reconciler"
+	duckv1alpha1 "knative.dev/pkg/apis/duck/v1alpha1"
+	fakedynamicclient "knative.dev/pkg/injection/clients/dynamicclient/fake"
 )
 
 var (
@@ -65,7 +65,7 @@ func TestGetSinkURI(t *testing.T) {
 			},
 			namespace: testNS,
 			ref:       getAddressableRef(),
-			want:      fmt.Sprintf("http://%s/", addressableDNS),
+			want:      fmt.Sprintf("http://%s", addressableDNS),
 		},
 		"nil hostname": {
 			objects: []runtime.Object{
@@ -105,14 +105,11 @@ func TestGetSinkURI(t *testing.T) {
 			wantErr:   fmt.Errorf(`Error fetching sink &ObjectReference{Kind:%s,Namespace:%s,Name:%s,UID:,APIVersion:%s,ResourceVersion:,FieldPath:,} for source "%s": %s "%s" not found`, unaddressableKind, testNS, unaddressableName, unaddressableAPIVersion, unaddressableName, unaddressableResource, unaddressableName),
 		},
 	}
+
 	for n, tc := range testCases {
 		t.Run(n, func(t *testing.T) {
-			sr := NewSinkReconciler(
-				reconciler.Options{
-					DynamicClientSet: fake.NewSimpleDynamicClient(scheme.Scheme, tc.objects...),
-				},
-				func(string) {},
-			)
+			ctx, _ := fakedynamicclient.With(context.Background(), scheme.Scheme, tc.objects...)
+			sr := NewSinkReconciler(ctx, func(types.NamespacedName) {})
 			sourceName := "nilRef"
 			if tc.ref != nil {
 				sourceName = tc.ref.Name

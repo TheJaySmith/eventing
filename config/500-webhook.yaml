@@ -15,14 +15,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: webhook
+  name: eventing-webhook
   namespace: knative-eventing
+  labels:
+    eventing.knative.dev/release: devel
 spec:
   replicas: 1
   selector:
     matchLabels: &labels
-      app: webhook
-      role: webhook
+      app: eventing-webhook
+      role: eventing-webhook
   template:
     metadata:
       annotations:
@@ -31,14 +33,20 @@ spec:
     spec:
       serviceAccountName: eventing-webhook
       containers:
-      - name: webhook
+      - name: eventing-webhook
         terminationMessagePolicy: FallbackToLogsOnError
         # This is the Go import path for the binary that is containerized
         # and substituted here.
-        image: github.com/knative/eventing/cmd/webhook
-        volumeMounts:
-        - name: config-logging
-          mountPath: /etc/config-logging
+        image: knative.dev/eventing/cmd/webhook
+        resources:
+          requests:
+            # taken from serving.
+            cpu: 20m
+            memory: 20Mi
+          limits:
+            # taken from serving.
+            cpu: 200m
+            memory: 200Mi
         env:
         - name: SYSTEM_NAMESPACE
           valueFrom:
@@ -46,12 +54,7 @@ spec:
               fieldPath: metadata.namespace
         - name: CONFIG_LOGGING_NAME
           value: config-logging
+        - name: METRICS_DOMAIN
+          value: knative.dev/eventing
         - name: WEBHOOK_NAME
-          value: webhook
-        resources:
-          limits:
-            memory: 1000Mi   # An initial guess, but consistent with serving
-      volumes:
-        - name: config-logging
-          configMap:
-            name: config-logging
+          value: eventing-webhook

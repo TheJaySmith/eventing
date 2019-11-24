@@ -19,20 +19,23 @@ package resources
 import (
 	"fmt"
 
-	"github.com/knative/eventing/pkg/apis/sources/v1alpha1"
-	"github.com/knative/pkg/kmeta"
 	v1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"knative.dev/eventing/pkg/apis/sources/v1alpha1"
+	"knative.dev/eventing/pkg/utils"
+	"knative.dev/pkg/kmeta"
 )
 
 // ReceiveAdapterArgs are the arguments needed to create a ApiServer Receive Adapter.
 // Every field is required.
 type ReceiveAdapterArgs struct {
-	Image   string
-	Source  *v1alpha1.ApiServerSource
-	Labels  map[string]string
-	SinkURI string
+	Image         string
+	Source        *v1alpha1.ApiServerSource
+	Labels        map[string]string
+	SinkURI       string
+	MetricsConfig string
+	LoggingConfig string
 }
 
 // MakeReceiveAdapter generates (but does not insert into K8s) the Receive Adapter Deployment for
@@ -41,9 +44,9 @@ func MakeReceiveAdapter(args *ReceiveAdapterArgs) *v1.Deployment {
 	replicas := int32(1)
 	return &v1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace:    args.Source.Namespace,
-			GenerateName: fmt.Sprintf("apiserversource-%s-", args.Source.Name),
-			Labels:       args.Labels,
+			Namespace: args.Source.Namespace,
+			Name:      utils.GenerateFixedName(args.Source, fmt.Sprintf("apiserversource-%s", args.Source.Name)),
+			Labels:    args.Labels,
 			OwnerReferences: []metav1.OwnerReference{
 				*kmeta.NewControllerRef(args.Source),
 			},
@@ -66,7 +69,11 @@ func MakeReceiveAdapter(args *ReceiveAdapterArgs) *v1.Deployment {
 						{
 							Name:  "receive-adapter",
 							Image: args.Image,
-							Env:   makeEnv(args.SinkURI, &args.Source.Spec),
+							Env:   makeEnv(args.SinkURI, args.LoggingConfig, args.MetricsConfig, &args.Source.Spec, args.Source.ObjectMeta.Name),
+							Ports: []corev1.ContainerPort{{
+								Name:          "metrics",
+								ContainerPort: 9090,
+							}},
 						},
 					},
 				},
@@ -75,21 +82,36 @@ func MakeReceiveAdapter(args *ReceiveAdapterArgs) *v1.Deployment {
 	}
 }
 
-func makeEnv(sinkURI string, spec *v1alpha1.ApiServerSourceSpec) []corev1.EnvVar {
+func makeEnv(sinkURI, loggingConfig, metricsConfig string, spec *v1alpha1.ApiServerSourceSpec, name string) []corev1.EnvVar {
 	apiversions := ""
 	kinds := ""
 	controlled := ""
+	selectors := ""
+	ownerapiversions := ""
+	ownerkinds := ""
 	sep := ""
+	boolsep := ""
 
 	for _, res := range spec.Resources {
 		apiversions += sep + res.APIVersion
 		kinds += sep + res.Kind
+		ownerapiversions += sep + res.ControllerSelector.APIVersion
+		ownerkinds += sep + res.ControllerSelector.Kind
+
 		if res.Controller {
-			controlled += sep + "true"
+			controlled += boolsep + "true"
 		} else {
-			controlled += sep + "false"
+			controlled += boolsep + "false"
 		}
-		sep = ","
+
+		// No need to check for error here.
+		selector, _ := metav1.LabelSelectorAsSelector(&res.LabelSelector)
+		labelSelector := selector.String()
+
+		selectors += sep + labelSelector
+
+		sep = ";"
+		boolsep = ","
 	}
 
 	return []corev1.EnvVar{{
@@ -105,14 +127,35 @@ func makeEnv(sinkURI string, spec *v1alpha1.ApiServerSourceSpec) []corev1.EnvVar
 		Name:  "KIND",
 		Value: kinds,
 	}, {
+		Name:  "OWNER_API_VERSION",
+		Value: ownerapiversions,
+	}, {
+		Name:  "OWNER_KIND",
+		Value: ownerkinds,
+	}, {
 		Name:  "CONTROLLER",
 		Value: controlled,
 	}, {
-		Name: "SYSTEM_NAMESPACE",
+		Name:  "SELECTOR",
+		Value: selectors,
+	}, {
+		Name: "NAMESPACE",
 		ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{
 				FieldPath: "metadata.namespace",
 			},
 		},
+	}, {
+		Name:  "NAME",
+		Value: name,
+	}, {
+		Name:  "METRICS_DOMAIN",
+		Value: "knative.dev/eventing",
+	}, {
+		Name:  "K_METRICS_CONFIG",
+		Value: metricsConfig,
+	}, {
+		Name:  "K_LOGGING_CONFIG",
+		Value: loggingConfig,
 	}}
 }

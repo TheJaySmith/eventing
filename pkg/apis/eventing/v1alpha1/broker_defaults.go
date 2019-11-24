@@ -19,33 +19,20 @@ package v1alpha1
 import (
 	"context"
 
-	"github.com/knative/eventing/pkg/apis/eventing"
-
-	"github.com/knative/pkg/apis"
-	"k8s.io/apimachinery/pkg/api/equality"
+	eventingduckv1alpha1 "knative.dev/eventing/pkg/apis/duck/v1alpha1"
 )
 
 func (b *Broker) SetDefaults(ctx context.Context) {
-	b.Spec.SetDefaults(ctx)
-
-	if ui := apis.GetUserInfo(ctx); ui != nil {
-		ans := b.GetAnnotations()
-		if ans == nil {
-			ans = map[string]string{}
-			defer b.SetAnnotations(ans)
-		}
-
-		if apis.IsInUpdate(ctx) {
-			old := apis.GetBaseline(ctx).(*Broker)
-			if equality.Semantic.DeepEqual(old.Spec, b.Spec) {
-				return
-			}
-			ans[eventing.UpdaterAnnotation] = ui.Username
-		} else {
-			ans[eventing.CreatorAnnotation] = ui.Username
-			ans[eventing.UpdaterAnnotation] = ui.Username
+	// If we haven't configured the new channelTemplate,
+	// then set the default channel to the new channelTemplate.
+	if b != nil && b.Spec.ChannelTemplate == nil {
+		// The singleton may not have been set, if so ignore it and validation will reject the Broker.
+		if cd := eventingduckv1alpha1.ChannelDefaulterSingleton; cd != nil {
+			channelTemplate := cd.GetDefault(b.Namespace)
+			b.Spec.ChannelTemplate = channelTemplate
 		}
 	}
+	b.Spec.SetDefaults(ctx)
 }
 
 func (bs *BrokerSpec) SetDefaults(ctx context.Context) {

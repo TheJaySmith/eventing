@@ -19,13 +19,13 @@ limitations under the License.
 package fake
 
 import (
-	v1alpha1 "github.com/knative/eventing/pkg/apis/sources/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	testing "k8s.io/client-go/testing"
+	v1alpha1 "knative.dev/eventing/pkg/apis/sources/v1alpha1"
 )
 
 // FakeContainerSources implements ContainerSourceInterface
@@ -131,7 +131,7 @@ func (c *FakeContainerSources) DeleteCollection(options *v1.DeleteOptions, listO
 // Patch applies the patch and returns the patched containerSource.
 func (c *FakeContainerSources) Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *v1alpha1.ContainerSource, err error) {
 	obj, err := c.Fake.
-		Invokes(testing.NewPatchSubresourceAction(containersourcesResource, c.ns, name, data, subresources...), &v1alpha1.ContainerSource{})
+		Invokes(testing.NewPatchSubresourceAction(containersourcesResource, c.ns, name, pt, data, subresources...), &v1alpha1.ContainerSource{})
 
 	if obj == nil {
 		return nil, err

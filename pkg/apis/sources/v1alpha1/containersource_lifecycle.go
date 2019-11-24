@@ -17,27 +17,28 @@ limitations under the License.
 package v1alpha1
 
 import (
-	duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	"knative.dev/pkg/apis"
 )
 
 const (
 	// ContainerSourceConditionReady has status True when the ContainerSource is ready to send events.
-	ContainerConditionReady = duckv1alpha1.ConditionReady
+	ContainerConditionReady = apis.ConditionReady
 
 	// ContainerConditionSinkProvided has status True when the ContainerSource has been configured with a sink target.
-	ContainerConditionSinkProvided duckv1alpha1.ConditionType = "SinkProvided"
+	ContainerConditionSinkProvided apis.ConditionType = "SinkProvided"
 
 	// ContainerConditionDeployed has status True when the ContainerSource has had it's deployment created.
-	ContainerConditionDeployed duckv1alpha1.ConditionType = "Deployed"
+	ContainerConditionDeployed apis.ConditionType = "Deployed"
 )
 
-var containerCondSet = duckv1alpha1.NewLivingConditionSet(
+var containerCondSet = apis.NewLivingConditionSet(
 	ContainerConditionSinkProvided,
 	ContainerConditionDeployed,
 )
 
 // GetCondition returns the condition currently associated with the given type, or nil.
-func (s *ContainerSourceStatus) GetCondition(t duckv1alpha1.ConditionType) *duckv1alpha1.Condition {
+func (s *ContainerSourceStatus) GetCondition(t apis.ConditionType) *apis.Condition {
 	return containerCondSet.Manage(s).GetCondition(t)
 }
 
@@ -58,6 +59,22 @@ func (s *ContainerSourceStatus) MarkSink(uri string) {
 		containerCondSet.Manage(s).MarkTrue(ContainerConditionSinkProvided)
 	} else {
 		containerCondSet.Manage(s).MarkUnknown(ContainerConditionSinkProvided, "SinkEmpty", "Sink has resolved to empty.%s", "")
+	}
+}
+
+// MarkSinkWarnDeprecated sets the condition that the source has a sink configured and warns ref is deprecated.
+func (s *ContainerSourceStatus) MarkSinkWarnRefDeprecated(uri string) {
+	s.SinkURI = uri
+	if len(uri) > 0 {
+		c := apis.Condition{
+			Type:     ContainerConditionSinkProvided,
+			Status:   corev1.ConditionTrue,
+			Severity: apis.ConditionSeverityError,
+			Message:  "Using deprecated object ref fields when specifying spec.sink. Update to spec.sink.ref. These will be removed in the future.",
+		}
+		apiserverCondSet.Manage(s).SetCondition(c)
+	} else {
+		apiserverCondSet.Manage(s).MarkUnknown(ContainerConditionSinkProvided, "SinkEmpty", "Sink has resolved to empty.%s", "")
 	}
 }
 

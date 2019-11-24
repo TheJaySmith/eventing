@@ -19,13 +19,13 @@ limitations under the License.
 package fake
 
 import (
-	v1alpha1 "github.com/knative/eventing/pkg/apis/sources/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	testing "k8s.io/client-go/testing"
+	v1alpha1 "knative.dev/eventing/pkg/apis/sources/v1alpha1"
 )
 
 // FakeCronJobSources implements CronJobSourceInterface
@@ -131,7 +131,7 @@ func (c *FakeCronJobSources) DeleteCollection(options *v1.DeleteOptions, listOpt
 // Patch applies the patch and returns the patched cronJobSource.
 func (c *FakeCronJobSources) Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *v1alpha1.CronJobSource, err error) {
 	obj, err := c.Fake.
-		Invokes(testing.NewPatchSubresourceAction(cronjobsourcesResource, c.ns, name, data, subresources...), &v1alpha1.CronJobSource{})
+		Invokes(testing.NewPatchSubresourceAction(cronjobsourcesResource, c.ns, name, pt, data, subresources...), &v1alpha1.CronJobSource{})
 
 	if obj == nil {
 		return nil, err

@@ -14,27 +14,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+readonly ROOT_DIR=$(dirname $0)/..
+source ${ROOT_DIR}/vendor/knative.dev/test-infra/scripts/library.sh
+
 set -o errexit
 set -o nounset
 set -o pipefail
 
-source $(dirname $0)/../vendor/github.com/knative/test-infra/scripts/library.sh
-
-cd ${REPO_ROOT_DIR}
+cd ${ROOT_DIR}
 
 # Ensure we have everything we need under vendor/
 dep ensure
 
+rm -rf $(find vendor/ -name 'OWNERS')
+rm -rf $(find vendor/ -name 'OWNERS_ALIASES')
 rm -rf $(find vendor/ -name 'BUILD')
 rm -rf $(find vendor/ -name 'BUILD.bazel')
 
 update_licenses third_party/VENDOR-LICENSE \
   $(find . -name "*.go" | grep -v vendor | xargs grep "package main" | cut -d: -f1 | xargs -n1 dirname | uniq)
 
-
 # HACK HACK HACK
-# TODO(https://github.com/knative/eventing/issues/1065): remove when we can update top 1.13.0 k8s clients.
-# k8s.io/client-go/dynamic/fake/simple.go has a bug until > v1.13.0, they did not set the scheme in the fake dynamic client.
-# Because this is only for testing code to work, adding patch to update deps.
-# produced with git diff origin/master HEAD -- vendor/k8s.io/client-go/dynamic/fake/simple.go > ./hack/k8s-dynamic-fake-simple.patch
-git apply ${REPO_ROOT_DIR}/hack/k8s-dynamic-fake-simple.patch
+# The only way we found to create a consistent Trace tree without any missing Spans is to
+# artificially set the SpanId. See pkg/tracing/traceparent.go for more details.
+# Produced with:
+# git diff origin/master HEAD -- vendor/go.opencensus.io/trace/trace.go > ./hack/set-span-id.patch
+git apply ${REPO_ROOT_DIR}/hack/set-span-id.patch

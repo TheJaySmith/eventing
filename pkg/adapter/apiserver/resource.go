@@ -20,16 +20,21 @@ import (
 	"context"
 
 	cloudevents "github.com/cloudevents/sdk-go"
-	"github.com/knative/eventing/pkg/adapter/apiserver/events"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
+	"knative.dev/eventing/pkg/adapter/apiserver/events"
+	"knative.dev/pkg/source"
 )
 
 type resource struct {
-	ce     cloudevents.Client
-	source string
-	logger *zap.SugaredLogger
+	ce        cloudevents.Client
+	source    string
+	eventType string
+	logger    *zap.SugaredLogger
+	reporter  source.StatsReporter
+	namespace string
+	name      string
 }
 
 var _ cache.Store = (*resource)(nil)
@@ -41,12 +46,7 @@ func (a *resource) Add(obj interface{}) error {
 		return err
 	}
 
-	if _, err := a.ce.Send(context.Background(), *event); err != nil {
-		a.logger.Info("event delivery failed", zap.Error(err))
-		return err
-	}
-
-	return nil
+	return a.sendEvent(context.Background(), event)
 }
 
 func (a *resource) Update(obj interface{}) error {
@@ -56,12 +56,7 @@ func (a *resource) Update(obj interface{}) error {
 		return err
 	}
 
-	if _, err := a.ce.Send(context.Background(), *event); err != nil {
-		a.logger.Info("event delivery failed", zap.Error(err))
-		return err
-	}
-
-	return nil
+	return a.sendEvent(context.Background(), event)
 }
 
 func (a *resource) Delete(obj interface{}) error {
@@ -71,12 +66,25 @@ func (a *resource) Delete(obj interface{}) error {
 		return err
 	}
 
-	if _, err := a.ce.Send(context.Background(), *event); err != nil {
-		a.logger.Info("event delivery failed", zap.Error(err))
-		return err
+	return a.sendEvent(context.Background(), event)
+}
+
+func (a *resource) sendEvent(ctx context.Context, event *cloudevents.Event) error {
+	reportArgs := &source.ReportArgs{
+		Namespace:     a.namespace,
+		EventSource:   event.Source(),
+		EventType:     event.Type(),
+		Name:          a.name,
+		ResourceGroup: resourceGroup,
 	}
 
-	return nil
+	rctx, _, err := a.ce.Send(ctx, *event)
+	if err != nil {
+		a.logger.Info("failed to send a resource based event ", zap.Error(err))
+	}
+	rtctx := cloudevents.HTTPTransportContextFrom(rctx)
+	a.reporter.ReportEventCount(reportArgs, rtctx.StatusCode)
+	return err
 }
 
 func (a *resource) addControllerWatch(gvr schema.GroupVersionResource) {

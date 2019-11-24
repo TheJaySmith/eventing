@@ -20,15 +20,15 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/knative/eventing/pkg/apis/sources/v1alpha1"
+	"k8s.io/apimachinery/pkg/types"
+	"knative.dev/eventing/pkg/apis/sources/v1alpha1"
 )
 
 // CronJobSourceOption enables further configuration of a CronJob.
 type CronJobSourceOption func(*v1alpha1.CronJobSource)
 
-// NewCronJob creates a CronJob with CronJobOptions
-func NewCronSourceJob(name, namespace string, o ...CronJobSourceOption) *v1alpha1.CronJobSource {
+// NewCronJobSource creates a CronJobSource with CronJobOptions.
+func NewCronJobSource(name, namespace string, o ...CronJobSourceOption) *v1alpha1.CronJobSource {
 	c := &v1alpha1.CronJobSource{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -38,11 +38,17 @@ func NewCronSourceJob(name, namespace string, o ...CronJobSourceOption) *v1alpha
 	for _, opt := range o {
 		opt(c)
 	}
-	//c.SetDefaults(context.Background()) // TODO: We should add defaults and validation.
+	// c.SetDefaults(context.Background()) // TODO: We should add defaults and validation.
 	return c
 }
 
-// WithInitCronJobConditions initializes the CronJobSource's conditions.
+func WithCronJobSourceUID(uid string) CronJobSourceOption {
+	return func(c *v1alpha1.CronJobSource) {
+		c.UID = types.UID(uid)
+	}
+}
+
+// WithInitCronJobSourceConditions initializes the CronJobSource's conditions.
 func WithInitCronJobSourceConditions(s *v1alpha1.CronJobSource) {
 	s.Status.InitializeConditions()
 }
@@ -66,11 +72,15 @@ func WithCronJobSourceSink(uri string) CronJobSourceOption {
 }
 
 func WithCronJobSourceDeployed(s *v1alpha1.CronJobSource) {
-	s.Status.MarkDeployed()
+	s.Status.PropagateDeploymentAvailability(NewDeployment("any", "any", WithDeploymentAvailable()))
 }
 
 func WithCronJobSourceEventType(s *v1alpha1.CronJobSource) {
 	s.Status.MarkEventType()
+}
+
+func WithValidCronJobSourceResources(s *v1alpha1.CronJobSource) {
+	s.Status.MarkResourcesCorrect()
 }
 
 func WithCronJobSourceDeleted(c *v1alpha1.CronJobSource) {
@@ -81,5 +91,23 @@ func WithCronJobSourceDeleted(c *v1alpha1.CronJobSource) {
 func WithCronJobSourceSpec(spec v1alpha1.CronJobSourceSpec) CronJobSourceOption {
 	return func(c *v1alpha1.CronJobSource) {
 		c.Spec = spec
+	}
+}
+
+func WithCronJobApiVersion(apiVersion string) CronJobSourceOption {
+	return func(c *v1alpha1.CronJobSource) {
+		c.APIVersion = apiVersion
+	}
+}
+
+func WithCronJobSourceStatusObservedGeneration(generation int64) CronJobSourceOption {
+	return func(c *v1alpha1.CronJobSource) {
+		c.Status.ObservedGeneration = generation
+	}
+}
+
+func WithCronJobSourceObjectMetaGeneration(generation int64) CronJobSourceOption {
+	return func(c *v1alpha1.CronJobSource) {
+		c.ObjectMeta.Generation = generation
 	}
 }

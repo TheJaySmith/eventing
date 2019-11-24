@@ -19,15 +19,18 @@ limitations under the License.
 package v1alpha1
 
 import (
-	v1alpha1 "github.com/knative/eventing/pkg/apis/messaging/v1alpha1"
-	"github.com/knative/eventing/pkg/client/clientset/versioned/scheme"
-	serializer "k8s.io/apimachinery/pkg/runtime/serializer"
 	rest "k8s.io/client-go/rest"
+	v1alpha1 "knative.dev/eventing/pkg/apis/messaging/v1alpha1"
+	"knative.dev/eventing/pkg/client/clientset/versioned/scheme"
 )
 
 type MessagingV1alpha1Interface interface {
 	RESTClient() rest.Interface
+	ChannelsGetter
 	InMemoryChannelsGetter
+	ParallelsGetter
+	SequencesGetter
+	SubscriptionsGetter
 }
 
 // MessagingV1alpha1Client is used to interact with features provided by the messaging.knative.dev group.
@@ -35,8 +38,24 @@ type MessagingV1alpha1Client struct {
 	restClient rest.Interface
 }
 
+func (c *MessagingV1alpha1Client) Channels(namespace string) ChannelInterface {
+	return newChannels(c, namespace)
+}
+
 func (c *MessagingV1alpha1Client) InMemoryChannels(namespace string) InMemoryChannelInterface {
 	return newInMemoryChannels(c, namespace)
+}
+
+func (c *MessagingV1alpha1Client) Parallels(namespace string) ParallelInterface {
+	return newParallels(c, namespace)
+}
+
+func (c *MessagingV1alpha1Client) Sequences(namespace string) SequenceInterface {
+	return newSequences(c, namespace)
+}
+
+func (c *MessagingV1alpha1Client) Subscriptions(namespace string) SubscriptionInterface {
+	return newSubscriptions(c, namespace)
 }
 
 // NewForConfig creates a new MessagingV1alpha1Client for the given config.
@@ -71,7 +90,7 @@ func setConfigDefaults(config *rest.Config) error {
 	gv := v1alpha1.SchemeGroupVersion
 	config.GroupVersion = &gv
 	config.APIPath = "/apis"
-	config.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: scheme.Codecs}
+	config.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
 
 	if config.UserAgent == "" {
 		config.UserAgent = rest.DefaultKubernetesUserAgent()

@@ -19,13 +19,13 @@ limitations under the License.
 package fake
 
 import (
-	v1alpha1 "github.com/knative/eventing/pkg/apis/messaging/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	testing "k8s.io/client-go/testing"
+	v1alpha1 "knative.dev/eventing/pkg/apis/messaging/v1alpha1"
 )
 
 // FakeInMemoryChannels implements InMemoryChannelInterface
@@ -131,7 +131,7 @@ func (c *FakeInMemoryChannels) DeleteCollection(options *v1.DeleteOptions, listO
 // Patch applies the patch and returns the patched inMemoryChannel.
 func (c *FakeInMemoryChannels) Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *v1alpha1.InMemoryChannel, err error) {
 	obj, err := c.Fake.
-		Invokes(testing.NewPatchSubresourceAction(inmemorychannelsResource, c.ns, name, data, subresources...), &v1alpha1.InMemoryChannel{})
+		Invokes(testing.NewPatchSubresourceAction(inmemorychannelsResource, c.ns, name, pt, data, subresources...), &v1alpha1.InMemoryChannel{})
 
 	if obj == nil {
 		return nil, err

@@ -17,31 +17,77 @@ limitations under the License.
 package trigger
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"testing"
 
-	"github.com/knative/eventing/pkg/apis/eventing/v1alpha1"
-	fakeclientset "github.com/knative/eventing/pkg/client/clientset/versioned/fake"
-	informers "github.com/knative/eventing/pkg/client/informers/externalversions"
-	"github.com/knative/eventing/pkg/reconciler"
-	brokerresources "github.com/knative/eventing/pkg/reconciler/broker/resources"
-	reconciletesting "github.com/knative/eventing/pkg/reconciler/testing"
-	"github.com/knative/eventing/pkg/reconciler/trigger/resources"
-	"github.com/knative/eventing/pkg/utils"
-	duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
-	"github.com/knative/pkg/controller"
-	logtesting "github.com/knative/pkg/logging/testing"
-	. "github.com/knative/pkg/reconciler/testing"
-	"github.com/knative/pkg/tracker"
+	"knative.dev/pkg/resolver"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	kubeinformers "k8s.io/client-go/informers"
-	fakekubeclientset "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	clientgotesting "k8s.io/client-go/testing"
+	"knative.dev/eventing/pkg/duck"
+	duckv1alpha1 "knative.dev/pkg/apis/duck/v1alpha1"
+	"knative.dev/pkg/configmap"
+	"knative.dev/pkg/controller"
+	logtesting "knative.dev/pkg/logging/testing"
+	"knative.dev/pkg/tracker"
+
+	"knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	messagingv1alpha1 "knative.dev/eventing/pkg/apis/messaging/v1alpha1"
+	sourcesv1alpha1 "knative.dev/eventing/pkg/apis/sources/v1alpha1"
+	"knative.dev/eventing/pkg/reconciler"
+	brokerresources "knative.dev/eventing/pkg/reconciler/broker/resources"
+	reconciletesting "knative.dev/eventing/pkg/reconciler/testing"
+	"knative.dev/eventing/pkg/reconciler/trigger/resources"
+	"knative.dev/eventing/pkg/utils"
+	"knative.dev/pkg/apis"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
+	duckv1beta1 "knative.dev/pkg/apis/duck/v1beta1"
+
+	. "knative.dev/eventing/pkg/reconciler/testing"
+	. "knative.dev/pkg/reconciler/testing"
+)
+
+var (
+	sinkRef = corev1.ObjectReference{
+		Name:       sinkName,
+		Kind:       "Channel",
+		APIVersion: "messaging.knative.dev/v1alpha1",
+	}
+
+	brokerRef = corev1.ObjectReference{
+		Name:       sinkName,
+		Kind:       "Broker",
+		APIVersion: "eventing.knative.dev/v1alpha1",
+	}
+	brokerDest = duckv1beta1.Destination{
+		Ref: &corev1.ObjectReference{
+			Name:       sinkName,
+			Kind:       "Broker",
+			APIVersion: "eventing.knative.dev/v1alpha1",
+		},
+	}
+	sinkDNS = "sink.mynamespace.svc." + utils.GetClusterDomainName()
+	sinkURI = "http://" + sinkDNS
+
+	subscriberGVK = metav1.GroupVersionKind{
+		Group:   subscriberGroup,
+		Version: subscriberVersion,
+		Kind:    subscriberKind,
+	}
+	subscriberAPIVersion = fmt.Sprintf("%s/%s", subscriberGroup, subscriberVersion)
+
+	k8sServiceGVK = metav1.GroupVersionKind{
+		Group:   "",
+		Version: "v1",
+		Kind:    "Service",
+	}
 )
 
 const (
@@ -50,65 +96,39 @@ const (
 	triggerUID  = "test-trigger-uid"
 	brokerName  = "test-broker"
 
-	subscriberAPIVersion = "v1"
-	subscriberKind       = "Service"
-	subscriberName       = "subscriberName"
-	subscriberURI        = "http://example.com/subscriber"
+	subscriberGroup             = "serving.knative.dev"
+	subscriberVersion           = "v1"
+	subscriberKind              = "Service"
+	subscriberName              = "subscriber-name"
+	subscriberURI               = "http://example.com/subscriber/"
+	subscriberURIReference      = "foo"
+	subscriberResolvedTargetURI = "http://example.com/subscriber/foo"
+
+	k8sServiceResolvedURI = "http://subscriber-name.test-namespace.svc.cluster.local/"
+
+	dependencyAnnotation    = "{\"kind\":\"CronJobSource\",\"name\":\"test-cronjob-source\",\"apiVersion\":\"sources.eventing.knative.dev/v1alpha1\"}"
+	cronJobSourceName       = "test-cronjob-source"
+	cronJobSourceAPIVersion = "sources.eventing.knative.dev/v1alpha1"
+	testSchedule            = "*/2 * * * *"
+	testData                = "data"
+	sinkName                = "testsink"
+
+	injectionAnnotation = "enabled"
+
+	currentGeneration  = 1
+	outdatedGeneration = 0
 )
 
 var (
 	trueVal = true
+
+	subscriptionName = fmt.Sprintf("%s-%s-%s", brokerName, triggerName, triggerUID)
 )
 
 func init() {
 	// Add types to scheme
 	_ = v1alpha1.AddToScheme(scheme.Scheme)
 	_ = duckv1alpha1.AddToScheme(scheme.Scheme)
-}
-
-func TestNewController(t *testing.T) {
-	kubeClient := fakekubeclientset.NewSimpleClientset()
-	eventingClient := fakeclientset.NewSimpleClientset()
-
-	// Create informer factories with fake clients. The second parameter sets the
-	// resync period to zero, disabling it.
-	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
-	eventingInformerFactory := informers.NewSharedInformerFactory(eventingClient, 0)
-
-	// Eventing
-	triggerInformer := eventingInformerFactory.Eventing().V1alpha1().Triggers()
-	channelInformer := eventingInformerFactory.Eventing().V1alpha1().Channels()
-	subscriptionInformer := eventingInformerFactory.Eventing().V1alpha1().Subscriptions()
-	brokerInformer := eventingInformerFactory.Eventing().V1alpha1().Brokers()
-
-	// Kube
-	serviceInformer := kubeInformerFactory.Core().V1().Services()
-
-	// Duck
-	addressableInformer := &fakeAddressableInformer{}
-
-	c := NewController(
-		reconciler.Options{
-			KubeClientSet:     kubeClient,
-			EventingClientSet: eventingClient,
-			Logger:            logtesting.TestLogger(t),
-		},
-		triggerInformer,
-		channelInformer,
-		subscriptionInformer,
-		brokerInformer,
-		serviceInformer,
-		addressableInformer)
-
-	if c == nil {
-		t.Fatalf("Failed to create with NewController")
-	}
-}
-
-type fakeAddressableInformer struct{}
-
-func (*fakeAddressableInformer) TrackInNamespace(tracker.Interface, metav1.Object) func(corev1.ObjectReference) error {
-	return func(corev1.ObjectReference) error { return nil }
 }
 
 func TestAllCases(t *testing.T) {
@@ -134,7 +154,7 @@ func TestAllCases(t *testing.T) {
 			//				Eventf(corev1.EventTypeWarning, "ChannelReferenceFetchFailed", "Failed to validate spec.channel exists: s \"\" not found"),
 			//			},
 		}, {
-			Name: "Broker not found",
+			Name: "Non-default broker not found",
 			Key:  triggerKey,
 			Objects: []runtime.Object{
 				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
@@ -149,9 +169,65 @@ func TestAllCases(t *testing.T) {
 				Object: reconciletesting.NewTrigger(triggerName, testNS, brokerName,
 					reconciletesting.WithTriggerUID(triggerUID),
 					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+
 					// The first reconciliation will initialize the status conditions.
 					reconciletesting.WithInitTriggerConditions,
 					reconciletesting.WithTriggerBrokerFailed("DoesNotExist", "Broker does not exist"),
+				),
+			}},
+		}, {
+			Name: "Default broker not found, with injection annotation enabled",
+			Key:  triggerKey,
+			Objects: []runtime.Object{
+				reconciletesting.NewTrigger(triggerName, testNS, "default",
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithInjectionAnnotation(injectionAnnotation)),
+				reconciletesting.NewNamespace(testNS,
+					reconciletesting.WithNamespaceLabeled(map[string]string{})),
+			},
+			WantErr: true,
+			WantEvents: []string{
+				Eventf(corev1.EventTypeWarning, "TriggerReconcileFailed", "Trigger reconciliation failed: broker.eventing.knative.dev \"default\" not found"),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: reconciletesting.NewTrigger(triggerName, testNS, "default",
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithInjectionAnnotation(injectionAnnotation),
+					reconciletesting.WithTriggerBrokerFailed("DoesNotExist", "Broker does not exist"),
+				),
+			}},
+			WantUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: reconciletesting.NewNamespace(testNS,
+					reconciletesting.WithNamespaceLabeled(map[string]string{v1alpha1.InjectionAnnotation: injectionAnnotation})),
+			}},
+		}, {
+			Name: "Default broker found, with injection annotation enabled",
+			Key:  triggerKey,
+			Objects: []runtime.Object{
+				makeReadyDefaultBroker(),
+				reconciletesting.NewTrigger(triggerName, testNS, "default",
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithInjectionAnnotation(injectionAnnotation)),
+			},
+			WantErr: true,
+			WantEvents: []string{
+				// Only check if default broker is ready (not check other resources), so failed at the next step, check for filter service
+				Eventf(corev1.EventTypeWarning, "TriggerServiceFailed", "Broker's Filter service not found"),
+				Eventf(corev1.EventTypeWarning, "TriggerReconcileFailed", "Trigger reconciliation failed: failed to find Broker's Filter service"),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: reconciletesting.NewTrigger(triggerName, testNS, "default",
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithTriggerBrokerReady(),
+					reconciletesting.WithInjectionAnnotation(injectionAnnotation),
 				),
 			}},
 		}, {
@@ -196,7 +272,7 @@ func TestAllCases(t *testing.T) {
 			Name: "No Broker Trigger Channel",
 			Key:  triggerKey,
 			Objects: []runtime.Object{
-				makeReadyBroker(),
+				makeReadyBrokerNoTriggerChannel(),
 				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
 					reconciletesting.WithTriggerUID(triggerUID),
 					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
@@ -221,8 +297,7 @@ func TestAllCases(t *testing.T) {
 			Name: "No Broker Ingress Channel",
 			Key:  triggerKey,
 			Objects: []runtime.Object{
-				makeReadyBroker(),
-				makeTriggerChannel(),
+				makeReadyBrokerNoIngressChannel(),
 				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
 					reconciletesting.WithTriggerUID(triggerUID),
 					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
@@ -248,8 +323,6 @@ func TestAllCases(t *testing.T) {
 			Key:  triggerKey,
 			Objects: []runtime.Object{
 				makeReadyBroker(),
-				makeTriggerChannel(),
-				makeIngressChannel(),
 				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
 					reconciletesting.WithTriggerUID(triggerUID),
 					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
@@ -271,12 +344,38 @@ func TestAllCases(t *testing.T) {
 				),
 			}},
 		}, {
+			Name: "Subscription not owned by Trigger",
+			Key:  triggerKey,
+			Objects: []runtime.Object{
+				makeReadyBroker(),
+				makeBrokerFilterService(),
+				makeIngressSubscriptionNotOwnedByTrigger(),
+				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					reconciletesting.WithInitTriggerConditions,
+				),
+			},
+			WantErr: true,
+			WantEvents: []string{
+				Eventf(corev1.EventTypeWarning, "TriggerReconcileFailed", "Trigger reconciliation failed: trigger %q does not own subscription %q", triggerName, subscriptionName)},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					// The first reconciliation will initialize the status conditions.
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithTriggerBrokerReady(),
+					reconciletesting.WithTriggerNotSubscribed("NotSubscribed", fmt.Sprintf("trigger %q does not own subscription %q", triggerName, subscriptionName)),
+					reconciletesting.WithTriggerStatusSubscriberURI(subscriberURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
+				),
+			}},
+		}, {
 			Name: "Subscription create fail",
 			Key:  triggerKey,
 			Objects: []runtime.Object{
 				makeReadyBroker(),
-				makeTriggerChannel(),
-				makeIngressChannel(),
 				makeBrokerFilterService(),
 				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
 					reconciletesting.WithTriggerUID(triggerUID),
@@ -300,9 +399,10 @@ func TestAllCases(t *testing.T) {
 					reconciletesting.WithTriggerBrokerReady(),
 					reconciletesting.WithTriggerNotSubscribed("NotSubscribed", "inducing failure for create subscriptions"),
 					reconciletesting.WithTriggerStatusSubscriberURI(subscriberURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
 				),
 			}},
-			WantCreates: []metav1.Object{
+			WantCreates: []runtime.Object{
 				makeIngressSubscription(),
 			},
 		}, {
@@ -310,8 +410,6 @@ func TestAllCases(t *testing.T) {
 			Key:  triggerKey,
 			Objects: []runtime.Object{
 				makeReadyBroker(),
-				makeTriggerChannel(),
-				makeIngressChannel(),
 				makeBrokerFilterService(),
 				makeDifferentReadySubscription(),
 				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
@@ -336,20 +434,17 @@ func TestAllCases(t *testing.T) {
 					reconciletesting.WithTriggerBrokerReady(),
 					reconciletesting.WithTriggerNotSubscribed("NotSubscribed", "inducing failure for delete subscriptions"),
 					reconciletesting.WithTriggerStatusSubscriberURI(subscriberURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
 				),
 			}},
-			// Name being "" is NOT a bug. Because we use generate name, the object created
-			// does not have a name...
 			WantDeletes: []clientgotesting.DeleteActionImpl{{
-				Name: "",
+				Name: subscriptionName,
 			}},
 		}, {
 			Name: "Subscription create after delete fail",
 			Key:  triggerKey,
 			Objects: []runtime.Object{
 				makeReadyBroker(),
-				makeTriggerChannel(),
-				makeIngressChannel(),
 				makeBrokerFilterService(),
 				makeDifferentReadySubscription(),
 				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
@@ -374,14 +469,13 @@ func TestAllCases(t *testing.T) {
 					reconciletesting.WithTriggerBrokerReady(),
 					reconciletesting.WithTriggerNotSubscribed("NotSubscribed", "inducing failure for create subscriptions"),
 					reconciletesting.WithTriggerStatusSubscriberURI(subscriberURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
 				),
 			}},
-			// Name being "" is NOT a bug. Because we use generate name, the object created
-			// does not have a name...
 			WantDeletes: []clientgotesting.DeleteActionImpl{{
-				Name: "",
+				Name: subscriptionName,
 			}},
-			WantCreates: []metav1.Object{
+			WantCreates: []runtime.Object{
 				makeIngressSubscription(),
 			},
 		}, {
@@ -389,8 +483,6 @@ func TestAllCases(t *testing.T) {
 			Key:  triggerKey,
 			Objects: []runtime.Object{
 				makeReadyBroker(),
-				makeTriggerChannel(),
-				makeIngressChannel(),
 				makeBrokerFilterService(),
 				makeDifferentReadySubscription(),
 				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
@@ -412,14 +504,14 @@ func TestAllCases(t *testing.T) {
 					reconciletesting.WithTriggerBrokerReady(),
 					reconciletesting.WithTriggerNotSubscribed("SubscriptionNotReady", "Subscription is not ready: nil"),
 					reconciletesting.WithTriggerStatusSubscriberURI(subscriberURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
+					reconciletesting.WithTriggerDependencyReady(),
 				),
 			}},
-			// Name being "" is NOT a bug. Because we use generate name, the object created
-			// does not have a name...
 			WantDeletes: []clientgotesting.DeleteActionImpl{{
-				Name: "",
+				Name: subscriptionName,
 			}},
-			WantCreates: []metav1.Object{
+			WantCreates: []runtime.Object{
 				makeIngressSubscription(),
 			},
 		}, {
@@ -427,8 +519,6 @@ func TestAllCases(t *testing.T) {
 			Key:  triggerKey,
 			Objects: []runtime.Object{
 				makeReadyBroker(),
-				makeTriggerChannel(),
-				makeIngressChannel(),
 				makeBrokerFilterService(),
 				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
 					reconciletesting.WithTriggerUID(triggerUID),
@@ -449,18 +539,143 @@ func TestAllCases(t *testing.T) {
 					reconciletesting.WithTriggerBrokerReady(),
 					reconciletesting.WithTriggerNotSubscribed("SubscriptionNotReady", "Subscription is not ready: nil"),
 					reconciletesting.WithTriggerStatusSubscriberURI(subscriberURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
+					reconciletesting.WithTriggerDependencyReady(),
 				),
 			}},
-			WantCreates: []metav1.Object{
+			WantCreates: []runtime.Object{
 				makeIngressSubscription(),
 			},
+		}, {
+			Name: "Trigger has subscriber ref exists",
+			Key:  triggerKey,
+			Objects: []runtime.Object{
+				makeReadyBroker(),
+				makeBrokerFilterService(),
+				makeSubscriberAddressableAsUnstructured(),
+				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberRef(subscriberGVK, subscriberName),
+					reconciletesting.WithInitTriggerConditions,
+				),
+			},
+			WantErr: false,
+			WantEvents: []string{
+				Eventf(corev1.EventTypeNormal, "TriggerReconciled", "Trigger reconciled"),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberRef(subscriberGVK, subscriberName),
+					// The first reconciliation will initialize the status conditions.
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithTriggerBrokerReady(),
+					reconciletesting.WithTriggerNotSubscribed("SubscriptionNotReady", "Subscription is not ready: nil"),
+					reconciletesting.WithTriggerStatusSubscriberURI(subscriberURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
+					reconciletesting.WithTriggerDependencyReady(),
+				),
+			}},
+			WantCreates: []runtime.Object{
+				makeIngressSubscription(),
+			},
+		}, {
+			Name: "Trigger has subscriber ref exists and URI",
+			Key:  triggerKey,
+			Objects: []runtime.Object{
+				makeReadyBroker(),
+				makeBrokerFilterService(),
+				makeSubscriberAddressableAsUnstructured(),
+				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberRefAndURIReference(subscriberGVK, subscriberName, subscriberURIReference),
+					reconciletesting.WithInitTriggerConditions,
+				),
+			},
+			WantErr: false,
+			WantEvents: []string{
+				Eventf(corev1.EventTypeNormal, "TriggerReconciled", "Trigger reconciled"),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberRefAndURIReference(subscriberGVK, subscriberName, subscriberURIReference),
+					// The first reconciliation will initialize the status conditions.
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithTriggerBrokerReady(),
+					reconciletesting.WithTriggerNotSubscribed("SubscriptionNotReady", "Subscription is not ready: nil"),
+					reconciletesting.WithTriggerStatusSubscriberURI(subscriberResolvedTargetURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
+					reconciletesting.WithTriggerDependencyReady(),
+				),
+			}},
+			WantCreates: []runtime.Object{
+				makeIngressSubscription(),
+			},
+		}, {
+			Name: "Trigger has subscriber ref exists kubernetes Service",
+			Key:  triggerKey,
+			Objects: []runtime.Object{
+				makeReadyBroker(),
+				makeBrokerFilterService(),
+				makeSubscriberKubernetesServiceAsUnstructured(),
+				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberRef(k8sServiceGVK, subscriberName),
+					reconciletesting.WithInitTriggerConditions,
+				),
+			},
+			WantErr: false,
+			WantEvents: []string{
+				Eventf(corev1.EventTypeNormal, "TriggerReconciled", "Trigger reconciled"),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberRef(k8sServiceGVK, subscriberName),
+					// The first reconciliation will initialize the status conditions.
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithTriggerBrokerReady(),
+					reconciletesting.WithTriggerNotSubscribed("SubscriptionNotReady", "Subscription is not ready: nil"),
+					reconciletesting.WithTriggerStatusSubscriberURI(k8sServiceResolvedURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
+					reconciletesting.WithTriggerDependencyReady(),
+				),
+			}},
+			WantCreates: []runtime.Object{
+				makeIngressSubscription(),
+			},
+		}, {
+			Name: "Trigger has subscriber ref doesn't exist",
+			Key:  triggerKey,
+			Objects: []runtime.Object{
+				makeReadyBroker(),
+				makeBrokerFilterService(),
+				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberRef(subscriberGVK, subscriberName),
+					reconciletesting.WithInitTriggerConditions,
+				),
+			},
+			WantErr: true,
+			WantEvents: []string{
+				Eventf(corev1.EventTypeWarning, "TriggerReconcileFailed", `Trigger reconciliation failed: failed to get ref &ObjectReference{Kind:Service,Namespace:test-namespace,Name:subscriber-name,UID:,APIVersion:serving.knative.dev/v1,ResourceVersion:,FieldPath:,}: services.serving.knative.dev "subscriber-name" not found`),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberRef(subscriberGVK, subscriberName),
+					// The first reconciliation will initialize the status conditions.
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithTriggerBrokerReady(),
+					reconciletesting.WithTriggerSubscriberResolvedFailed("Unable to get the Subscriber's URI", `failed to get ref &ObjectReference{Kind:Service,Namespace:test-namespace,Name:subscriber-name,UID:,APIVersion:serving.knative.dev/v1,ResourceVersion:,FieldPath:,}: services.serving.knative.dev "subscriber-name" not found`),
+				),
+			}},
 		}, {
 			Name: "Subscription not ready, trigger marked not ready",
 			Key:  triggerKey,
 			Objects: []runtime.Object{
 				makeReadyBroker(),
-				makeTriggerChannel(),
-				makeIngressChannel(),
 				makeBrokerFilterService(),
 				makeNotReadySubscription(),
 				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
@@ -480,8 +695,10 @@ func TestAllCases(t *testing.T) {
 					// The first reconciliation will initialize the status conditions.
 					reconciletesting.WithInitTriggerConditions,
 					reconciletesting.WithTriggerBrokerReady(),
-					reconciletesting.WithTriggerNotSubscribed("SubscriptionNotReady", "Subscription is not ready: nil"),
+					reconciletesting.WithTriggerNotSubscribed("SubscriptionNotReady", "Subscription is not ready: test induced [error]"),
 					reconciletesting.WithTriggerStatusSubscriberURI(subscriberURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
+					reconciletesting.WithTriggerDependencyReady(),
 				),
 			}},
 		}, {
@@ -489,8 +706,6 @@ func TestAllCases(t *testing.T) {
 			Key:  triggerKey,
 			Objects: []runtime.Object{
 				makeReadyBroker(),
-				makeTriggerChannel(),
-				makeIngressChannel(),
 				makeBrokerFilterService(),
 				makeReadySubscription(),
 				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
@@ -513,26 +728,159 @@ func TestAllCases(t *testing.T) {
 					reconciletesting.WithTriggerBrokerReady(),
 					reconciletesting.WithTriggerSubscribed(),
 					reconciletesting.WithTriggerStatusSubscriberURI(subscriberURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
+					reconciletesting.WithTriggerDependencyReady(),
+				),
+			}},
+		}, {
+			Name: "Dependency doesn't exist",
+			Key:  triggerKey,
+			Objects: []runtime.Object{
+				makeReadyBroker(),
+				makeBrokerFilterService(),
+				makeReadySubscription(),
+				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithDependencyAnnotation(dependencyAnnotation),
+				),
+			},
+			WantErr: true,
+			WantEvents: []string{
+				Eventf(corev1.EventTypeWarning, "TriggerReconcileFailed", "Trigger reconciliation failed: propagating dependency readiness: getting the dependency: cronjobsources.sources.eventing.knative.dev \"test-cronjob-source\" not found"),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					// The first reconciliation will initialize the status conditions.
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithDependencyAnnotation(dependencyAnnotation),
+					reconciletesting.WithTriggerBrokerReady(),
+					reconciletesting.WithTriggerSubscribed(),
+					reconciletesting.WithTriggerStatusSubscriberURI(subscriberURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
+					reconciletesting.WithTriggerDependencyUnknown("DependencyDoesNotExist", "Dependency does not exist: cronjobsources.sources.eventing.knative.dev \"test-cronjob-source\" not found"),
+				),
+			}},
+		}, {
+			Name: "Dependency not ready",
+			Key:  triggerKey,
+			Objects: []runtime.Object{
+				makeReadyBroker(),
+				makeBrokerFilterService(),
+				makeReadySubscription(),
+				makeNotReadyCronJobSource(),
+				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithDependencyAnnotation(dependencyAnnotation),
+				),
+			},
+			WantErr: false,
+			WantEvents: []string{
+				Eventf(corev1.EventTypeNormal, "TriggerReconciled", "Trigger reconciled")},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					// The first reconciliation will initialize the status conditions.
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithDependencyAnnotation(dependencyAnnotation),
+					reconciletesting.WithTriggerBrokerReady(),
+					reconciletesting.WithTriggerSubscribed(),
+					reconciletesting.WithTriggerStatusSubscriberURI(subscriberURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
+					reconciletesting.WithTriggerDependencyFailed("DependencyNotReady", "Dependency is not ready: "),
+				),
+			}},
+		}, {
+			Name: "Dependency generation not equal",
+			Key:  triggerKey,
+			Objects: []runtime.Object{
+				makeReadyBroker(),
+				makeBrokerFilterService(),
+				makeReadySubscription(),
+				makeGenerationNotEqualCronJobSource(),
+				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithDependencyAnnotation(dependencyAnnotation),
+				),
+			},
+			WantErr: false,
+			WantEvents: []string{
+				Eventf(corev1.EventTypeNormal, "TriggerReconciled", "Trigger reconciled")},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					// The first reconciliation will initialize the status conditions.
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithDependencyAnnotation(dependencyAnnotation),
+					reconciletesting.WithTriggerBrokerReady(),
+					reconciletesting.WithTriggerSubscribed(),
+					reconciletesting.WithTriggerStatusSubscriberURI(subscriberURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
+					reconciletesting.WithTriggerDependencyUnknown("GenerationNotEqual", fmt.Sprintf("The dependency's metadata.generation, %q, is not equal to its status.observedGeneration, %q.", currentGeneration, outdatedGeneration))),
+			}},
+		},
+		{
+			Name: "Dependency ready",
+			Key:  triggerKey,
+			Objects: []runtime.Object{
+				makeReadyBroker(),
+				makeBrokerFilterService(),
+				makeReadySubscription(),
+				makeReadyCronJobSource(),
+				reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithDependencyAnnotation(dependencyAnnotation),
+				),
+			},
+			WantErr: false,
+			WantEvents: []string{
+				Eventf(corev1.EventTypeNormal, "TriggerReconciled", "Trigger reconciled"),
+				Eventf(corev1.EventTypeNormal, "TriggerReadinessChanged", `Trigger "test-trigger" became ready`)},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: reconciletesting.NewTrigger(triggerName, testNS, brokerName,
+					reconciletesting.WithTriggerUID(triggerUID),
+					reconciletesting.WithTriggerSubscriberURI(subscriberURI),
+					// The first reconciliation will initialize the status conditions.
+					reconciletesting.WithInitTriggerConditions,
+					reconciletesting.WithDependencyAnnotation(dependencyAnnotation),
+					reconciletesting.WithTriggerBrokerReady(),
+					reconciletesting.WithTriggerSubscribed(),
+					reconciletesting.WithTriggerStatusSubscriberURI(subscriberURI),
+					reconciletesting.WithTriggerSubscriberResolvedSucceeded(),
+					reconciletesting.WithTriggerDependencyReady(),
 				),
 			}},
 		},
 	}
 
-	defer logtesting.ClearAll()
-
-	table.Test(t, reconciletesting.MakeFactory(func(listers *reconciletesting.Listers, opt reconciler.Options) controller.Reconciler {
+	logger := logtesting.TestLogger(t)
+	table.Test(t, MakeFactory(func(ctx context.Context, listers *Listers, cmw configmap.Watcher) controller.Reconciler {
 		return &Reconciler{
-			Base:                reconciler.NewBase(opt, controllerAgentName),
-			triggerLister:       listers.GetTriggerLister(),
-			channelLister:       listers.GetChannelLister(),
-			subscriptionLister:  listers.GetSubscriptionLister(),
-			brokerLister:        listers.GetBrokerLister(),
-			serviceLister:       listers.GetK8sServiceLister(),
-			addressableInformer: &fakeAddressableInformer{},
-			tracker:             tracker.New(func(string) {}, 0),
+			Base:               reconciler.NewBase(ctx, controllerAgentName, cmw),
+			triggerLister:      listers.GetTriggerLister(),
+			subscriptionLister: listers.GetSubscriptionLister(),
+			brokerLister:       listers.GetBrokerLister(),
+			serviceLister:      listers.GetK8sServiceLister(),
+			namespaceLister:    listers.GetNamespaceLister(),
+			tracker:            tracker.New(func(types.NamespacedName) {}, 0),
+			addressableTracker: duck.NewListableTracker(ctx, &duckv1alpha1.AddressableType{}, func(types.NamespacedName) {}, 0),
+			kresourceTracker:   duck.NewListableTracker(ctx, &duckv1.KResource{}, func(types.NamespacedName) {}, 0),
+			uriResolver:        resolver.NewURIResolver(ctx, func(types.NamespacedName) {}),
 		}
 	},
 		false,
+		logger,
 	))
 }
 
@@ -550,12 +898,12 @@ func makeTrigger() *v1alpha1.Trigger {
 		Spec: v1alpha1.TriggerSpec{
 			Broker: brokerName,
 			Filter: &v1alpha1.TriggerFilter{
-				SourceAndType: &v1alpha1.TriggerFilterSourceAndType{
+				DeprecatedSourceAndType: &v1alpha1.TriggerFilterSourceAndType{
 					Source: "Any",
 					Type:   "Any",
 				},
 			},
-			Subscriber: &v1alpha1.SubscriberSpec{
+			Subscriber: &duckv1.Destination{
 				Ref: &corev1.ObjectReference{
 					Name:       subscriberName,
 					Kind:       subscriberKind,
@@ -576,66 +924,74 @@ func makeBroker() *v1alpha1.Broker {
 			Namespace: testNS,
 			Name:      brokerName,
 		},
-		Spec: v1alpha1.BrokerSpec{
-			ChannelTemplate: &v1alpha1.ChannelSpec{
-				Provisioner: makeChannelProvisioner(),
-			},
-		},
+		Spec: v1alpha1.BrokerSpec{},
 	}
 }
 
-func makeReadyBroker() *v1alpha1.Broker {
+func makeReadyBrokerNoTriggerChannel() *v1alpha1.Broker {
 	b := makeBroker()
 	b.Status = *v1alpha1.TestHelper.ReadyBrokerStatus()
 	return b
 }
 
-func makeChannelProvisioner() *corev1.ObjectReference {
+func makeReadyBrokerNoIngressChannel() *v1alpha1.Broker {
+	b := makeBroker()
+	b.Status = *v1alpha1.TestHelper.ReadyBrokerStatus()
+	b.Status.TriggerChannel = makeTriggerChannelRef()
+	return b
+}
+
+func makeReadyBroker() *v1alpha1.Broker {
+	b := makeBroker()
+	b.Status = *v1alpha1.TestHelper.ReadyBrokerStatus()
+	b.Status.TriggerChannel = makeTriggerChannelRef()
+	b.Status.IngressChannel = makeIngressChannelRef()
+	return b
+}
+
+func makeReadyDefaultBroker() *v1alpha1.Broker {
+	b := makeReadyBroker()
+	b.Name = "default"
+	return b
+}
+
+func makeTriggerChannelRef() *corev1.ObjectReference {
 	return &corev1.ObjectReference{
 		APIVersion: "eventing.knative.dev/v1alpha1",
-		Kind:       "ClusterChannelProvisioner",
-		Name:       "my-provisioner",
+		Kind:       "Channel",
+		Namespace:  testNS,
+		Name:       fmt.Sprintf("%s-kn-trigger", brokerName),
 	}
 }
 
-func newChannel(name string, labels map[string]string) *v1alpha1.Channel {
-	return &v1alpha1.Channel{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNS,
-			Name:      name,
-			Labels:    labels,
-			OwnerReferences: []metav1.OwnerReference{
-				getOwnerReference(),
+func makeIngressChannelRef() *corev1.ObjectReference {
+	return &corev1.ObjectReference{
+		APIVersion: "eventing.knative.dev/v1alpha1",
+		Kind:       "Channel",
+		Namespace:  testNS,
+		Name:       fmt.Sprintf("%s-kn-ingress", brokerName),
+	}
+}
+
+func makeSubscriberAddressableAsUnstructured() *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": subscriberAPIVersion,
+			"kind":       subscriberKind,
+			"metadata": map[string]interface{}{
+				"namespace": testNS,
+				"name":      subscriberName,
+			},
+			"status": map[string]interface{}{
+				"address": map[string]interface{}{
+					"url": subscriberURI,
+				},
 			},
 		},
-		Spec: v1alpha1.ChannelSpec{
-			Provisioner: makeChannelProvisioner(),
-		},
-		Status: v1alpha1.ChannelStatus{
-			Address: duckv1alpha1.Addressable{
-				Hostname: "any-non-empty-string",
-			},
-		},
 	}
 }
 
-func makeTriggerChannel() *v1alpha1.Channel {
-	labels := map[string]string{
-		"eventing.knative.dev/broker":           brokerName,
-		"eventing.knative.dev/brokerEverything": "true",
-	}
-	return newChannel(fmt.Sprintf("%s-broker", brokerName), labels)
-}
-
-func makeIngressChannel() *v1alpha1.Channel {
-	labels := map[string]string{
-		"eventing.knative.dev/broker":        brokerName,
-		"eventing.knative.dev/brokerIngress": "true",
-	}
-	return newChannel(fmt.Sprintf("%s-broker-ingress", brokerName), labels)
-}
-
-func makeSubscriberServiceAsUnstructured() *unstructured.Unstructured {
+func makeSubscriberKubernetesServiceAsUnstructured() *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "v1",
@@ -660,29 +1016,62 @@ func makeServiceURI() *url.URL {
 	}
 }
 
-func makeIngressSubscription() *v1alpha1.Subscription {
-	return resources.NewSubscription(makeTrigger(), makeTriggerChannel(), makeIngressChannel(), makeServiceURI())
+func makeIngressSubscription() *messagingv1alpha1.Subscription {
+	return resources.NewSubscription(makeTrigger(), makeTriggerChannelRef(), makeIngressChannelRef(), makeServiceURI())
+}
+
+func makeIngressSubscriptionNotOwnedByTrigger() *messagingv1alpha1.Subscription {
+	sub := makeIngressSubscription()
+	sub.OwnerReferences = []metav1.OwnerReference{}
+	return sub
 }
 
 // Just so we can test subscription updates
-func makeDifferentReadySubscription() *v1alpha1.Subscription {
-	uri := "http://example.com/differenturi"
+func makeDifferentReadySubscription() *messagingv1alpha1.Subscription {
 	s := makeIngressSubscription()
-	s.Spec.Subscriber.URI = &uri
+	s.Spec.Subscriber.URI = apis.HTTP("different.example.com")
 	s.Status = *v1alpha1.TestHelper.ReadySubscriptionStatus()
 	return s
 }
 
-func makeReadySubscription() *v1alpha1.Subscription {
+func makeReadySubscription() *messagingv1alpha1.Subscription {
 	s := makeIngressSubscription()
 	s.Status = *v1alpha1.TestHelper.ReadySubscriptionStatus()
 	return s
 }
 
-func makeNotReadySubscription() *v1alpha1.Subscription {
+func makeNotReadySubscription() *messagingv1alpha1.Subscription {
 	s := makeIngressSubscription()
 	s.Status = *v1alpha1.TestHelper.NotReadySubscriptionStatus()
 	return s
+}
+
+func makeNotReadyCronJobSource() *sourcesv1alpha1.CronJobSource {
+	return NewCronJobSource(cronJobSourceName, testNS, WithCronJobApiVersion(cronJobSourceAPIVersion), WithCronJobSourceSinkNotFound)
+}
+
+func makeGenerationNotEqualCronJobSource() *sourcesv1alpha1.CronJobSource {
+	c := makeNotReadyCronJobSource()
+	c.Generation = currentGeneration
+	c.Status.ObservedGeneration = outdatedGeneration
+	return c
+}
+
+func makeReadyCronJobSource() *sourcesv1alpha1.CronJobSource {
+	return NewCronJobSource(cronJobSourceName, testNS,
+		WithCronJobApiVersion(cronJobSourceAPIVersion),
+		WithCronJobSourceSpec(sourcesv1alpha1.CronJobSourceSpec{
+			Schedule: testSchedule,
+			Data:     testData,
+			Sink:     &brokerDest,
+		}),
+		WithInitCronJobSourceConditions,
+		WithValidCronJobSourceSchedule,
+		WithValidCronJobSourceResources,
+		WithCronJobSourceDeployed,
+		WithCronJobSourceEventType,
+		WithCronJobSourceSink(sinkURI),
+	)
 }
 
 func getOwnerReference() metav1.OwnerReference {

@@ -16,24 +16,32 @@
 
 package v1alpha1
 
-import duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
+import (
+	messagingv1alpha1 "knative.dev/eventing/pkg/apis/messaging/v1alpha1"
+	"knative.dev/pkg/apis"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
+)
 
-var triggerCondSet = duckv1alpha1.NewLivingConditionSet(TriggerConditionBroker, TriggerConditionSubscribed)
+var triggerCondSet = apis.NewLivingConditionSet(TriggerConditionBroker, TriggerConditionSubscribed, TriggerConditionDependency, TriggerConditionSubscriberResolved)
 
 const (
 	// TriggerConditionReady has status True when all subconditions below have been set to True.
-	TriggerConditionReady = duckv1alpha1.ConditionReady
+	TriggerConditionReady = apis.ConditionReady
 
-	TriggerConditionBroker duckv1alpha1.ConditionType = "Broker"
+	TriggerConditionBroker apis.ConditionType = "Broker"
 
-	TriggerConditionSubscribed duckv1alpha1.ConditionType = "Subscribed"
+	TriggerConditionSubscribed apis.ConditionType = "Subscribed"
+
+	TriggerConditionDependency apis.ConditionType = "Dependency"
+
+	TriggerConditionSubscriberResolved apis.ConditionType = "SubscriberResolved"
 
 	// TriggerAnyFilter Constant to represent that we should allow anything.
 	TriggerAnyFilter = ""
 )
 
 // GetCondition returns the condition currently associated with the given type, or nil.
-func (ts *TriggerStatus) GetCondition(t duckv1alpha1.ConditionType) *duckv1alpha1.Condition {
+func (ts *TriggerStatus) GetCondition(t apis.ConditionType) *apis.Condition {
 	return triggerCondSet.Manage(ts).GetCondition(t)
 }
 
@@ -63,12 +71,12 @@ func (ts *TriggerStatus) MarkBrokerFailed(reason, messageFormat string, messageA
 	triggerCondSet.Manage(ts).MarkFalse(TriggerConditionBroker, reason, messageFormat, messageA...)
 }
 
-func (ts *TriggerStatus) PropagateSubscriptionStatus(ss *SubscriptionStatus) {
+func (ts *TriggerStatus) PropagateSubscriptionStatus(ss *messagingv1alpha1.SubscriptionStatus) {
 	if ss.IsReady() {
 		triggerCondSet.Manage(ts).MarkTrue(TriggerConditionSubscribed)
 	} else {
 		msg := "nil"
-		if sc := subCondSet.Manage(ss).GetCondition(SubscriptionConditionReady); sc != nil {
+		if sc := ss.Status.GetCondition(messagingv1alpha1.SubscriptionConditionReady); sc != nil {
 			msg = sc.Message
 		}
 		ts.MarkNotSubscribed("SubscriptionNotReady", "Subscription is not ready: %s", msg)
@@ -77,4 +85,45 @@ func (ts *TriggerStatus) PropagateSubscriptionStatus(ss *SubscriptionStatus) {
 
 func (ts *TriggerStatus) MarkNotSubscribed(reason, messageFormat string, messageA ...interface{}) {
 	triggerCondSet.Manage(ts).MarkFalse(TriggerConditionSubscribed, reason, messageFormat, messageA...)
+}
+
+func (ts *TriggerStatus) MarkSubscriptionNotOwned(sub *messagingv1alpha1.Subscription) {
+	triggerCondSet.Manage(ts).MarkFalse(TriggerConditionSubscribed, "SubscriptionNotOwned", "Subscription %q is not owned by this Trigger.", sub.Name)
+}
+
+func (ts *TriggerStatus) MarkSubscriberResolvedSucceeded() {
+	triggerCondSet.Manage(ts).MarkTrue(TriggerConditionSubscriberResolved)
+}
+
+func (ts *TriggerStatus) MarkSubscriberResolvedFailed(reason, messageFormat string, messageA ...interface{}) {
+	triggerCondSet.Manage(ts).MarkFalse(TriggerConditionSubscriberResolved, reason, messageFormat, messageA...)
+}
+
+func (ts *TriggerStatus) MarkSubscriberResolvedUnknown(reason, messageFormat string, messageA ...interface{}) {
+	triggerCondSet.Manage(ts).MarkUnknown(TriggerConditionSubscriberResolved, reason, messageFormat, messageA...)
+}
+
+func (ts *TriggerStatus) MarkDependencySucceeded() {
+	triggerCondSet.Manage(ts).MarkTrue(TriggerConditionDependency)
+}
+
+func (ts *TriggerStatus) MarkDependencyFailed(reason, messageFormat string, messageA ...interface{}) {
+	triggerCondSet.Manage(ts).MarkFalse(TriggerConditionDependency, reason, messageFormat, messageA...)
+}
+
+func (ts *TriggerStatus) MarkDependencyUnknown(reason, messageFormat string, messageA ...interface{}) {
+	triggerCondSet.Manage(ts).MarkUnknown(TriggerConditionDependency, reason, messageFormat, messageA...)
+}
+
+func (ts *TriggerStatus) PropagateDependencyStatus(ks *duckv1.KResource) {
+	kc := ks.Status.GetCondition(apis.ConditionReady)
+	if kc != nil && kc.IsTrue() {
+		ts.MarkDependencySucceeded()
+	} else {
+		msg := "nil"
+		if kc != nil {
+			msg = kc.Message
+		}
+		ts.MarkDependencyFailed("DependencyNotReady", "Dependency is not ready: %s", msg)
+	}
 }

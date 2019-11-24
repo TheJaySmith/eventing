@@ -17,21 +17,25 @@ limitations under the License.
 package eventtype
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
-	"github.com/knative/pkg/tracker"
+	"knative.dev/pkg/configmap"
 
-	"github.com/knative/eventing/pkg/apis/eventing/v1alpha1"
-	"github.com/knative/eventing/pkg/reconciler"
-	. "github.com/knative/eventing/pkg/reconciler/testing"
-	"github.com/knative/pkg/controller"
-	logtesting "github.com/knative/pkg/logging/testing"
-	. "github.com/knative/pkg/reconciler/testing"
+	"knative.dev/pkg/tracker"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	clientgotesting "k8s.io/client-go/testing"
+	"knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	"knative.dev/eventing/pkg/reconciler"
+	. "knative.dev/eventing/pkg/reconciler/testing"
+	"knative.dev/pkg/controller"
+	logtesting "knative.dev/pkg/logging/testing"
+	. "knative.dev/pkg/reconciler/testing"
 )
 
 const (
@@ -152,15 +156,16 @@ func TestReconcile(t *testing.T) {
 		},
 	}
 
-	defer logtesting.ClearAll()
-	table.Test(t, MakeFactory(func(listers *Listers, opt reconciler.Options) controller.Reconciler {
+	logger := logtesting.TestLogger(t)
+	table.Test(t, MakeFactory(func(ctx context.Context, listers *Listers, cmw configmap.Watcher) controller.Reconciler {
 		return &Reconciler{
-			Base:            reconciler.NewBase(opt, controllerAgentName),
+			Base:            reconciler.NewBase(ctx, controllerAgentName, cmw),
 			eventTypeLister: listers.GetEventTypeLister(),
 			brokerLister:    listers.GetBrokerLister(),
-			tracker:         tracker.New(func(string) {}, 0),
+			tracker:         tracker.New(func(types.NamespacedName) {}, 0),
 		}
 	},
 		false,
+		logger,
 	))
 }

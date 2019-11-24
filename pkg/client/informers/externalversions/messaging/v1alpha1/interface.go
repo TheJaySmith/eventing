@@ -19,13 +19,21 @@ limitations under the License.
 package v1alpha1
 
 import (
-	internalinterfaces "github.com/knative/eventing/pkg/client/informers/externalversions/internalinterfaces"
+	internalinterfaces "knative.dev/eventing/pkg/client/informers/externalversions/internalinterfaces"
 )
 
 // Interface provides access to all the informers in this group version.
 type Interface interface {
+	// Channels returns a ChannelInformer.
+	Channels() ChannelInformer
 	// InMemoryChannels returns a InMemoryChannelInformer.
 	InMemoryChannels() InMemoryChannelInformer
+	// Parallels returns a ParallelInformer.
+	Parallels() ParallelInformer
+	// Sequences returns a SequenceInformer.
+	Sequences() SequenceInformer
+	// Subscriptions returns a SubscriptionInformer.
+	Subscriptions() SubscriptionInformer
 }
 
 type version struct {
@@ -39,7 +47,27 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
 }
 
+// Channels returns a ChannelInformer.
+func (v *version) Channels() ChannelInformer {
+	return &channelInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
 // InMemoryChannels returns a InMemoryChannelInformer.
 func (v *version) InMemoryChannels() InMemoryChannelInformer {
 	return &inMemoryChannelInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// Parallels returns a ParallelInformer.
+func (v *version) Parallels() ParallelInformer {
+	return &parallelInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// Sequences returns a SequenceInformer.
+func (v *version) Sequences() SequenceInformer {
+	return &sequenceInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// Subscriptions returns a SubscriptionInformer.
+func (v *version) Subscriptions() SubscriptionInformer {
+	return &subscriptionInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }

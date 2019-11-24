@@ -21,11 +21,12 @@ package externalversions
 import (
 	"fmt"
 
-	v1alpha1 "github.com/knative/eventing/pkg/apis/eventing/v1alpha1"
-	messagingv1alpha1 "github.com/knative/eventing/pkg/apis/messaging/v1alpha1"
-	sourcesv1alpha1 "github.com/knative/eventing/pkg/apis/sources/v1alpha1"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
+	v1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	flowsv1alpha1 "knative.dev/eventing/pkg/apis/flows/v1alpha1"
+	messagingv1alpha1 "knative.dev/eventing/pkg/apis/messaging/v1alpha1"
+	sourcesv1alpha1 "knative.dev/eventing/pkg/apis/sources/v1alpha1"
 )
 
 // GenericInformer is type of SharedIndexInformer which will locate and delegate to other
@@ -57,20 +58,28 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 	// Group=eventing.knative.dev, Version=v1alpha1
 	case v1alpha1.SchemeGroupVersion.WithResource("brokers"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Eventing().V1alpha1().Brokers().Informer()}, nil
-	case v1alpha1.SchemeGroupVersion.WithResource("channels"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Eventing().V1alpha1().Channels().Informer()}, nil
-	case v1alpha1.SchemeGroupVersion.WithResource("clusterchannelprovisioners"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Eventing().V1alpha1().ClusterChannelProvisioners().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("eventtypes"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Eventing().V1alpha1().EventTypes().Informer()}, nil
-	case v1alpha1.SchemeGroupVersion.WithResource("subscriptions"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Eventing().V1alpha1().Subscriptions().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("triggers"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Eventing().V1alpha1().Triggers().Informer()}, nil
 
+		// Group=flows.knative.dev, Version=v1alpha1
+	case flowsv1alpha1.SchemeGroupVersion.WithResource("parallels"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Flows().V1alpha1().Parallels().Informer()}, nil
+	case flowsv1alpha1.SchemeGroupVersion.WithResource("sequences"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Flows().V1alpha1().Sequences().Informer()}, nil
+
 		// Group=messaging.knative.dev, Version=v1alpha1
+	case messagingv1alpha1.SchemeGroupVersion.WithResource("channels"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Messaging().V1alpha1().Channels().Informer()}, nil
 	case messagingv1alpha1.SchemeGroupVersion.WithResource("inmemorychannels"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Messaging().V1alpha1().InMemoryChannels().Informer()}, nil
+	case messagingv1alpha1.SchemeGroupVersion.WithResource("parallels"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Messaging().V1alpha1().Parallels().Informer()}, nil
+	case messagingv1alpha1.SchemeGroupVersion.WithResource("sequences"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Messaging().V1alpha1().Sequences().Informer()}, nil
+	case messagingv1alpha1.SchemeGroupVersion.WithResource("subscriptions"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Messaging().V1alpha1().Subscriptions().Informer()}, nil
 
 		// Group=sources.eventing.knative.dev, Version=v1alpha1
 	case sourcesv1alpha1.SchemeGroupVersion.WithResource("apiserversources"):

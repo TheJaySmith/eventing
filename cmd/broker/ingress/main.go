@@ -17,252 +17,170 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"flag"
-	"fmt"
 	"log"
 	"net/http"
 	"net/url"
-	"os"
-	"reflect"
-	"sync"
 	"time"
 
-	cloudevents "github.com/cloudevents/sdk-go"
-	eventingv1alpha1 "github.com/knative/eventing/pkg/apis/eventing/v1alpha1"
-	"github.com/knative/eventing/pkg/broker"
-	"github.com/knative/eventing/pkg/provisioners"
-	"github.com/knative/eventing/pkg/utils"
-	"github.com/knative/pkg/signals"
-	"go.opencensus.io/exporter/prometheus"
-	"go.opencensus.io/stats"
-	"go.opencensus.io/stats/view"
-	"go.opencensus.io/tag"
-	"go.uber.org/zap"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
-	crlog "sigs.k8s.io/controller-runtime/pkg/runtime/log"
 	// Uncomment the following line to load the gcp plugin (only required to authenticate against GKE clusters).
 	// _ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
+
+	cloudevents "github.com/cloudevents/sdk-go"
+	"github.com/kelseyhightower/envconfig"
+	"go.uber.org/zap"
+
+	"go.opencensus.io/stats/view"
+	"knative.dev/eventing/pkg/broker/ingress"
+	"knative.dev/eventing/pkg/kncloudevents"
+	"knative.dev/eventing/pkg/tracing"
+	kubeclient "knative.dev/pkg/client/injection/kube/client"
+	"knative.dev/pkg/configmap"
+	"knative.dev/pkg/controller"
+	"knative.dev/pkg/injection"
+	"knative.dev/pkg/injection/sharedmain"
+	"knative.dev/pkg/logging"
+	"knative.dev/pkg/metrics"
+	"knative.dev/pkg/signals"
+	"knative.dev/pkg/system"
+	pkgtracing "knative.dev/pkg/tracing"
 )
 
 var (
-	defaultTTL = 255
-
-	metricsPort = 9090
-
-	writeTimeout    = 1 * time.Minute
-	shutdownTimeout = 1 * time.Minute
-
-	wg sync.WaitGroup
+	masterURL  = flag.String("master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
+	kubeconfig = flag.String("kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
 )
 
+// TODO make these constants configurable (either as env variables, config map, or part of broker spec).
+//  Issue: https://github.com/knative/eventing/issues/1777
+const (
+	// Constants for the underlying HTTP Client transport. These would enable better connection reuse.
+	// Purposely set them to be equal, as the ingress only connects to its channel.
+	// These are magic numbers, partly set based on empirical evidence running performance workloads, and partly
+	// based on what serving is doing. See https://github.com/knative/serving/blob/master/pkg/network/transports.go.
+	defaultMaxIdleConnections        = 1000
+	defaultMaxIdleConnectionsPerHost = 1000
+	component                        = "broker_ingress"
+)
+
+type envConfig struct {
+	Broker        string `envconfig:"BROKER" required:"true"`
+	Channel       string `envconfig:"CHANNEL" required:"true"`
+	Namespace     string `envconfig:"NAMESPACE" required:"true"`
+	PodName       string `split_words:"true" required:"true"`
+	ContainerName string `split_words:"true" required:"true"`
+}
+
 func main() {
-	logConfig := provisioners.NewLoggingConfig()
-	logger := provisioners.NewProvisionerLoggerFromConfig(logConfig).Desugar()
-	defer logger.Sync()
 	flag.Parse()
-	crlog.SetLogger(crlog.ZapLogger(false))
 
-	logger.Info("Starting...")
+	ctx := signals.NewContext()
 
-	mgr, err := manager.New(config.GetConfigOrDie(), manager.Options{})
+	// Report stats on Go memory usage every 30 seconds.
+	msp := metrics.NewMemStatsAll()
+	msp.Start(ctx, 30*time.Second)
+	if err := view.Register(msp.DefaultViews()...); err != nil {
+		log.Fatalf("Error exporting go memstats view: %v", err)
+	}
+
+	cfg, err := sharedmain.GetConfig(*masterURL, *kubeconfig)
 	if err != nil {
-		logger.Fatal("Error starting up.", zap.Error(err))
+		log.Fatal("Error building kubeconfig", err)
 	}
 
-	if err = eventingv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
-		logger.Fatal("Unable to add eventingv1alpha1 scheme", zap.Error(err))
-	}
+	log.Printf("Registering %d clients", len(injection.Default.GetClients()))
+	log.Printf("Registering %d informer factories", len(injection.Default.GetInformerFactories()))
+	log.Printf("Registering %d informers", len(injection.Default.GetInformers()))
 
-	brokerName := getRequiredEnv("BROKER")
+	ctx, informers := injection.Default.SetupInformers(ctx, cfg)
+
+	loggingConfig, err := sharedmain.GetLoggingConfig(ctx)
+	if err != nil {
+		log.Fatal("Error loading/parsing logging configuration:", err)
+	}
+	sl, atomicLevel := logging.NewLoggerFromConfig(loggingConfig, component)
+	logger := sl.Desugar()
+	defer flush(sl)
+
+	logger.Info("Starting the Broker Ingress")
+
+	var env envConfig
+	if err := envconfig.Process("", &env); err != nil {
+		logger.Fatal("Failed to process env var", zap.Error(err))
+	}
 
 	channelURI := &url.URL{
 		Scheme: "http",
-		Host:   getRequiredEnv("CHANNEL"),
+		Host:   env.Channel,
 		Path:   "/",
 	}
 
-	ceClient, err := cloudevents.NewDefaultClient()
+	// Watch the logging config map and dynamically update logging levels.
+	configMapWatcher := configmap.NewInformedWatcher(kubeclient.Get(ctx), system.Namespace())
+	// Watch the observability config map and dynamically update metrics exporter.
+	configMapWatcher.Watch(metrics.ConfigMapName(), metrics.UpdateExporterFromConfigMap(component, sl))
+	// TODO change the component name to broker once Stackdriver metrics are approved.
+	// Watch the observability config map and dynamically update request logs.
+	configMapWatcher.Watch(logging.ConfigMapName(), logging.UpdateLevelFromConfigMap(sl, atomicLevel, component))
+
+	bin := tracing.BrokerIngressName(tracing.BrokerIngressNameArgs{
+		Namespace:  env.Namespace,
+		BrokerName: env.Broker,
+	})
+	if err = tracing.SetupDynamicPublishing(sl, configMapWatcher, bin); err != nil {
+		logger.Fatal("Error setting up trace publishing", zap.Error(err))
+	}
+
+	httpTransport, err := cloudevents.NewHTTPTransport(cloudevents.WithBinaryEncoding(), cloudevents.WithMiddleware(pkgtracing.HTTPSpanMiddleware))
+	if err != nil {
+		logger.Fatal("Unable to create CE transport", zap.Error(err))
+	}
+
+	// Liveness check.
+	httpTransport.Handler = http.NewServeMux()
+	httpTransport.Handler.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	})
+
+	connectionArgs := kncloudevents.ConnectionArgs{
+		MaxIdleConns:        defaultMaxIdleConnections,
+		MaxIdleConnsPerHost: defaultMaxIdleConnectionsPerHost,
+	}
+	ceClient, err := kncloudevents.NewDefaultClientGivenHttpTransport(httpTransport, connectionArgs)
 	if err != nil {
 		logger.Fatal("Unable to create CE client", zap.Error(err))
 	}
-	h := &handler{
-		logger:     logger,
-		ceClient:   ceClient,
-		channelURI: channelURI,
-		brokerName: brokerName,
+
+	reporter := ingress.NewStatsReporter(env.PodName, env.ContainerName)
+
+	h := &ingress.Handler{
+		Logger:     logger,
+		CeClient:   ceClient,
+		ChannelURI: channelURI,
+		BrokerName: env.Broker,
+		Namespace:  env.Namespace,
+		Reporter:   reporter,
 	}
 
-	// Run the event handler with the manager.
-	err = mgr.Add(h)
-	if err != nil {
-		logger.Fatal("Unable to add handler", zap.Error(err))
+	// configMapWatcher does not block, so start it first.
+	if err = configMapWatcher.Start(ctx.Done()); err != nil {
+		logger.Warn("Failed to start ConfigMap watcher", zap.Error(err))
 	}
 
-	// Metrics
-	e, err := prometheus.NewExporter(prometheus.Options{Namespace: metricsNamespace})
-	if err != nil {
-		logger.Fatal("Unable to create Prometheus exporter", zap.Error(err))
-	}
-	view.RegisterExporter(e)
-	sm := http.NewServeMux()
-	sm.Handle("/metrics", e)
-	metricsSrv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", metricsPort),
-		Handler:      e,
-		ErrorLog:     zap.NewStdLog(logger),
-		WriteTimeout: writeTimeout,
+	// Start all of the informers and wait for them to sync.
+	logger.Info("Starting informers.")
+	if err := controller.StartInformers(ctx.Done(), informers...); err != nil {
+		logger.Fatal("Failed to start informers", zap.Error(err))
 	}
 
-	err = mgr.Add(&utils.RunnableServer{
-		Server:          metricsSrv,
-		ShutdownTimeout: shutdownTimeout,
-		WaitGroup:       &wg,
-	})
-	if err != nil {
-		logger.Fatal("Unable to add metrics runnableServer", zap.Error(err))
-	}
-
-	// Set up signals so we handle the first shutdown signal gracefully.
-	stopCh := signals.SetupSignalHandler()
 	// Start blocks forever.
-	if err = mgr.Start(stopCh); err != nil {
-		logger.Error("manager.Start() returned an error", zap.Error(err))
+	if err = h.Start(ctx); err != nil {
+		logger.Error("ingress.Start() returned an error", zap.Error(err))
 	}
 	logger.Info("Exiting...")
-
-	// TODO Gracefully shutdown the ingress server. CloudEvents SDK doesn't seem
-	// to let us do that today.
-	go func() {
-		<-time.After(shutdownTimeout)
-		log.Fatalf("Shutdown took longer than %v", shutdownTimeout)
-	}()
-
-	// Wait for runnables to stop. This blocks indefinitely, but the above
-	// goroutine will exit the process if it takes longer than shutdownTimeout.
-	wg.Wait()
-	logger.Info("Done.")
 }
 
-func getRequiredEnv(envKey string) string {
-	val, defined := os.LookupEnv(envKey)
-	if !defined {
-		log.Fatalf("required environment variable not defined '%s'", envKey)
-	}
-	return val
-}
-
-type handler struct {
-	logger     *zap.Logger
-	ceClient   cloudevents.Client
-	channelURI *url.URL
-	brokerName string
-}
-
-func (h *handler) Start(stopCh <-chan struct{}) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- h.ceClient.StartReceiver(ctx, h.serveHTTP)
-	}()
-
-	// Stop either if the receiver stops (sending to errCh) or if stopCh is closed.
-	select {
-	case err := <-errCh:
-		return err
-	case <-stopCh:
-		break
-	}
-
-	// stopCh has been closed, we need to gracefully shutdown h.ceClient. cancel() will start its
-	// shutdown, if it hasn't finished in a reasonable amount of time, just return an error.
-	cancel()
-	select {
-	case err := <-errCh:
-		return err
-	case <-time.After(shutdownTimeout):
-		return errors.New("timeout shutting down ceClient")
-	}
-}
-
-func (h *handler) serveHTTP(ctx context.Context, event cloudevents.Event, resp *cloudevents.EventResponse) error {
-	tctx := cloudevents.HTTPTransportContextFrom(ctx)
-	if tctx.Method != http.MethodPost {
-		resp.Status = http.StatusMethodNotAllowed
-		return nil
-	}
-
-	// tctx.URI is actually the path...
-	if tctx.URI != "/" {
-		resp.Status = http.StatusNotFound
-		return nil
-	}
-
-	ctx, _ = tag.New(ctx, tag.Insert(TagBroker, h.brokerName))
-	defer func() {
-		stats.Record(ctx, MeasureMessagesTotal.M(1))
-	}()
-
-	send := h.decrementTTL(&event)
-	if !send {
-		ctx, _ = tag.New(ctx, tag.Insert(TagResult, "droppedDueToTTL"))
-		return nil
-	}
-
-	// TODO Filter.
-
-	ctx, _ = tag.New(ctx, tag.Insert(TagResult, "dispatched"))
-	return h.sendEvent(ctx, tctx, event)
-}
-
-func (h *handler) sendEvent(ctx context.Context, tctx cloudevents.HTTPTransportContext, event cloudevents.Event) error {
-	sendingCTX := broker.SendingContext(ctx, tctx, h.channelURI)
-
-	startTS := time.Now()
-	defer func() {
-		dispatchTimeMS := int64(time.Now().Sub(startTS) / time.Millisecond)
-		stats.Record(sendingCTX, MeasureDispatchTime.M(dispatchTimeMS))
-	}()
-
-	_, err := h.ceClient.Send(sendingCTX, event)
-	if err != nil {
-		sendingCTX, _ = tag.New(sendingCTX, tag.Insert(TagResult, "error"))
-	} else {
-		sendingCTX, _ = tag.New(sendingCTX, tag.Insert(TagResult, "ok"))
-	}
-	return err
-}
-
-func (h *handler) decrementTTL(event *cloudevents.Event) bool {
-	ttl := h.getTTLToSet(event)
-	if ttl <= 0 {
-		// TODO send to some form of dead letter queue rather than dropping.
-		h.logger.Error("Dropping message due to TTL", zap.Any("event", event))
-		return false
-	}
-
-	var err error
-	event.Context, err = broker.SetTTL(event.Context, ttl)
-	if err != nil {
-		h.logger.Error("failed to set TTL", zap.Error(err))
-	}
-	return true
-}
-
-func (h *handler) getTTLToSet(event *cloudevents.Event) int {
-	ttlInterface, present := event.Context.AsV02().Extensions[broker.V02TTLAttribute]
-	if !present {
-		h.logger.Debug("No TTL found, defaulting")
-		return defaultTTL
-	}
-	// This should be a JSON number, which json.Unmarshalls as a float64.
-	ttl, ok := ttlInterface.(float64)
-	if !ok {
-		h.logger.Info("TTL attribute wasn't a float64, defaulting", zap.Any("ttlInterface", ttlInterface), zap.Any("typeOf(ttlInterface)", reflect.TypeOf(ttlInterface)))
-	}
-	return int(ttl) - 1
+func flush(logger *zap.SugaredLogger) {
+	_ = logger.Sync()
+	metrics.FlushExporter()
 }

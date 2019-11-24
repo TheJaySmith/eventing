@@ -23,15 +23,16 @@ import (
 	sync "sync"
 	time "time"
 
-	versioned "github.com/knative/eventing/pkg/client/clientset/versioned"
-	eventing "github.com/knative/eventing/pkg/client/informers/externalversions/eventing"
-	internalinterfaces "github.com/knative/eventing/pkg/client/informers/externalversions/internalinterfaces"
-	messaging "github.com/knative/eventing/pkg/client/informers/externalversions/messaging"
-	sources "github.com/knative/eventing/pkg/client/informers/externalversions/sources"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
+	versioned "knative.dev/eventing/pkg/client/clientset/versioned"
+	eventing "knative.dev/eventing/pkg/client/informers/externalversions/eventing"
+	flows "knative.dev/eventing/pkg/client/informers/externalversions/flows"
+	internalinterfaces "knative.dev/eventing/pkg/client/informers/externalversions/internalinterfaces"
+	messaging "knative.dev/eventing/pkg/client/informers/externalversions/messaging"
+	sources "knative.dev/eventing/pkg/client/informers/externalversions/sources"
 )
 
 // SharedInformerOption defines the functional option type for SharedInformerFactory.
@@ -175,12 +176,17 @@ type SharedInformerFactory interface {
 	WaitForCacheSync(stopCh <-chan struct{}) map[reflect.Type]bool
 
 	Eventing() eventing.Interface
+	Flows() flows.Interface
 	Messaging() messaging.Interface
 	Sources() sources.Interface
 }
 
 func (f *sharedInformerFactory) Eventing() eventing.Interface {
 	return eventing.New(f, f.namespace, f.tweakListOptions)
+}
+
+func (f *sharedInformerFactory) Flows() flows.Interface {
+	return flows.New(f, f.namespace, f.tweakListOptions)
 }
 
 func (f *sharedInformerFactory) Messaging() messaging.Interface {

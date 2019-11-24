@@ -23,7 +23,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/knative/eventing/pkg/apis/sources/v1alpha1"
+	"knative.dev/eventing/pkg/apis/sources/v1alpha1"
 )
 
 // ContainerSourceOption enables further configuration of a CronJob.
@@ -109,5 +109,17 @@ func WithContainerSourceLabels(labels map[string]string) ContainerSourceOption {
 func WithContainerSourceAnnotations(annotations map[string]string) ContainerSourceOption {
 	return func(c *v1alpha1.ContainerSource) {
 		c.Annotations = annotations
+	}
+}
+
+func WithContainerSourceStatusObservedGeneration(generation int64) ContainerSourceOption {
+	return func(c *v1alpha1.ContainerSource) {
+		c.Status.ObservedGeneration = generation
+	}
+}
+
+func WithContainerSourceObjectMetaGeneration(generation int64) ContainerSourceOption {
+	return func(c *v1alpha1.ContainerSource) {
+		c.ObjectMeta.Generation = generation
 	}
 }

@@ -17,7 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"github.com/knative/eventing/pkg/apis/eventing"
+	"knative.dev/eventing/pkg/apis/eventing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -47,16 +47,10 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&Broker{},
 		&BrokerList{},
-		&Channel{},
-		&ChannelList{},
-		&ClusterChannelProvisioner{},
-		&ClusterChannelProvisionerList{},
-		&Subscription{},
-		&SubscriptionList{},
-		&Trigger{},
-		&TriggerList{},
 		&EventType{},
 		&EventTypeList{},
+		&Trigger{},
+		&TriggerList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

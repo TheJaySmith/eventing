@@ -17,13 +17,14 @@
 package v1alpha1
 
 import (
-	eventingduck "github.com/knative/eventing/pkg/apis/duck/v1alpha1"
-	"github.com/knative/pkg/apis"
-	duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
-	"github.com/knative/pkg/webhook"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	eventingduck "knative.dev/eventing/pkg/apis/duck/v1alpha1"
+	"knative.dev/pkg/apis"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
+	duckv1alpha1 "knative.dev/pkg/apis/duck/v1alpha1"
+	"knative.dev/pkg/kmeta"
 )
 
 // +genclient
@@ -44,11 +45,19 @@ type InMemoryChannel struct {
 	Status InMemoryChannelStatus `json:"status,omitempty"`
 }
 
-// Check that Channel can be validated, can be defaulted, and has immutable fields.
-var _ apis.Validatable = (*InMemoryChannel)(nil)
-var _ apis.Defaultable = (*InMemoryChannel)(nil)
-var _ runtime.Object = (*InMemoryChannel)(nil)
-var _ webhook.GenericCRD = (*InMemoryChannel)(nil)
+var (
+	// Check that InMemoryChannel can be validated and defaulted.
+	_ apis.Validatable = (*InMemoryChannel)(nil)
+	_ apis.Defaultable = (*InMemoryChannel)(nil)
+
+	// Check that InMemoryChannel can return its spec untyped.
+	_ apis.HasSpec = (*InMemoryChannel)(nil)
+
+	_ runtime.Object = (*InMemoryChannel)(nil)
+
+	// Check that we can create OwnerReferences to an InMemoryChannel.
+	_ kmeta.OwnerRefable = (*InMemoryChannel)(nil)
+)
 
 // InMemoryChannelSpec defines which subscribers have expressed interest in
 // receiving events from this InMemoryChannel.
@@ -60,22 +69,25 @@ type InMemoryChannelSpec struct {
 
 // ChannelStatus represents the current state of a Channel.
 type InMemoryChannelStatus struct {
-	// inherits duck/v1alpha1 Status, which currently provides:
+	// inherits duck/v1 Status, which currently provides:
 	// * ObservedGeneration - the 'Generation' of the Service that was last processed by the controller.
 	// * Conditions - the latest available observations of a resource's current state.
-	duckv1alpha1.Status `json:",inline"`
+	duckv1.Status `json:",inline"`
 
 	// InMemoryChannel is Addressable. It currently exposes the endpoint as a
 	// fully-qualified DNS name which will distribute traffic over the
 	// provided targets from inside the cluster.
 	//
 	// It generally has the form {channel}.{namespace}.svc.{cluster domain name}
-	Address duckv1alpha1.Addressable `json:"address,omitempty"`
+	duckv1alpha1.AddressStatus `json:",inline"`
+
+	// Subscribers is populated with the statuses of each of the Channelable's subscribers.
+	eventingduck.SubscribableTypeStatus `json:",inline"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
-// ChannelList is a collection of Channels.
+// InMemoryChannelList is a collection of in-memory channels.
 type InMemoryChannelList struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional
@@ -86,4 +98,9 @@ type InMemoryChannelList struct {
 // GetGroupVersionKind returns GroupVersionKind for InMemoryChannels
 func (imc *InMemoryChannel) GetGroupVersionKind() schema.GroupVersionKind {
 	return SchemeGroupVersion.WithKind("InMemoryChannel")
+}
+
+// GetUntypedSpec returns the spec of the InMemoryChannel.
+func (i *InMemoryChannel) GetUntypedSpec() interface{} {
+	return i.Spec
 }

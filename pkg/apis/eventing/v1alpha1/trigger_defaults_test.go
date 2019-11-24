@@ -20,22 +20,28 @@ import (
 	"context"
 	"testing"
 
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/google/go-cmp/cmp"
 )
 
 var (
-	defaultBroker = "default"
-	otherBroker   = "other_broker"
-
-	otherTriggerFilter = &TriggerFilter{
-		SourceAndType: &TriggerFilterSourceAndType{
+	defaultBroker        = "default"
+	otherBroker          = "other_broker"
+	defaultTriggerFilter = &TriggerFilter{}
+	otherTriggerFilter   = &TriggerFilter{
+		DeprecatedSourceAndType: &TriggerFilterSourceAndType{
 			Type:   "other_type",
 			Source: "other_source"},
 	}
+
 	defaultTrigger = Trigger{
+		ObjectMeta: v1.ObjectMeta{
+			Labels: map[string]string{brokerLabel: defaultBroker},
+		},
 		Spec: TriggerSpec{
 			Broker: defaultBroker,
-			Filter: defaultTriggerFilter(),
+			Filter: defaultTriggerFilter,
 		},
 	}
 )
@@ -46,16 +52,38 @@ func TestTriggerDefaults(t *testing.T) {
 		expected Trigger
 	}{
 		"nil broker": {
-			initial:  Trigger{Spec: TriggerSpec{Filter: otherTriggerFilter}},
-			expected: Trigger{Spec: TriggerSpec{Broker: defaultBroker, Filter: otherTriggerFilter}},
+			initial: Trigger{Spec: TriggerSpec{Filter: otherTriggerFilter}},
+			expected: Trigger{
+				ObjectMeta: v1.ObjectMeta{
+					Labels: map[string]string{brokerLabel: defaultBroker},
+				},
+				Spec: TriggerSpec{Broker: defaultBroker, Filter: otherTriggerFilter}},
 		},
 		"nil filter": {
-			initial:  Trigger{Spec: TriggerSpec{Broker: otherBroker}},
-			expected: Trigger{Spec: TriggerSpec{Broker: otherBroker, Filter: defaultTriggerFilter()}},
+			initial: Trigger{Spec: TriggerSpec{Broker: otherBroker}},
+			expected: Trigger{
+				ObjectMeta: v1.ObjectMeta{
+					Labels: map[string]string{brokerLabel: otherBroker},
+				},
+				Spec: TriggerSpec{Broker: otherBroker, Filter: defaultTriggerFilter}},
 		},
 		"nil broker and nil filter": {
 			initial:  Trigger{},
 			expected: defaultTrigger,
+		},
+		"with broker and label": {
+			initial: Trigger{
+				ObjectMeta: v1.ObjectMeta{
+					Labels: map[string]string{"otherLabel": "my-other-label"},
+				},
+				Spec: TriggerSpec{Broker: defaultBroker}},
+			expected: Trigger{
+				ObjectMeta: v1.ObjectMeta{
+					Labels: map[string]string{
+						"otherLabel": "my-other-label",
+						brokerLabel:  defaultBroker},
+				},
+				Spec: TriggerSpec{Broker: defaultBroker, Filter: defaultTriggerFilter}},
 		},
 	}
 	for n, tc := range testCases {
@@ -65,14 +93,5 @@ func TestTriggerDefaults(t *testing.T) {
 				t.Fatalf("Unexpected defaults (-want, +got): %s", diff)
 			}
 		})
-	}
-}
-
-func defaultTriggerFilter() *TriggerFilter {
-	// Can't just be a package level var because it gets mutated.
-	return &TriggerFilter{
-		SourceAndType: &TriggerFilterSourceAndType{
-			Type:   TriggerAnyFilter,
-			Source: TriggerAnyFilter},
 	}
 }

@@ -17,20 +17,23 @@ limitations under the License.
 package resources
 
 import (
-	"github.com/knative/eventing/pkg/apis/sources/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"knative.dev/eventing/pkg/apis/sources/v1alpha1"
 )
 
 type ContainerArguments struct {
-	Source             *v1alpha1.ContainerSource
-	Name               string
-	Namespace          string
+	Source      *v1alpha1.ContainerSource
+	Name        string
+	Namespace   string
+	Template    *corev1.PodTemplateSpec
+	Sink        string
+	Annotations map[string]string
+	Labels      map[string]string
+
+	// TODO(jingweno): The following fields are to be deprecated
+	// Use `Template` instead
 	Image              string
 	Args               []string
 	Env                []corev1.EnvVar
 	ServiceAccountName string
-	SinkInArgs         bool
-	Sink               string
-	Annotations        map[string]string
-	Labels             map[string]string
 }

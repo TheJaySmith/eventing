@@ -19,12 +19,14 @@ limitations under the License.
 package v1alpha1
 
 import (
-	v1alpha1 "github.com/knative/eventing/pkg/apis/eventing/v1alpha1"
-	scheme "github.com/knative/eventing/pkg/client/clientset/versioned/scheme"
+	"time"
+
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	rest "k8s.io/client-go/rest"
+	v1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	scheme "knative.dev/eventing/pkg/client/clientset/versioned/scheme"
 )
 
 // BrokersGetter has a method to return a BrokerInterface.
@@ -76,11 +78,16 @@ func (c *brokers) Get(name string, options v1.GetOptions) (result *v1alpha1.Brok
 
 // List takes label and field selectors, and returns the list of Brokers that match those selectors.
 func (c *brokers) List(opts v1.ListOptions) (result *v1alpha1.BrokerList, err error) {
+	var timeout time.Duration
+	if opts.TimeoutSeconds != nil {
+		timeout = time.Duration(*opts.TimeoutSeconds) * time.Second
+	}
 	result = &v1alpha1.BrokerList{}
 	err = c.client.Get().
 		Namespace(c.ns).
 		Resource("brokers").
 		VersionedParams(&opts, scheme.ParameterCodec).
+		Timeout(timeout).
 		Do().
 		Into(result)
 	return
@@ -88,11 +95,16 @@ func (c *brokers) List(opts v1.ListOptions) (result *v1alpha1.BrokerList, err er
 
 // Watch returns a watch.Interface that watches the requested brokers.
 func (c *brokers) Watch(opts v1.ListOptions) (watch.Interface, error) {
+	var timeout time.Duration
+	if opts.TimeoutSeconds != nil {
+		timeout = time.Duration(*opts.TimeoutSeconds) * time.Second
+	}
 	opts.Watch = true
 	return c.client.Get().
 		Namespace(c.ns).
 		Resource("brokers").
 		VersionedParams(&opts, scheme.ParameterCodec).
+		Timeout(timeout).
 		Watch()
 }
 
@@ -150,10 +162,15 @@ func (c *brokers) Delete(name string, options *v1.DeleteOptions) error {
 
 // DeleteCollection deletes a collection of objects.
 func (c *brokers) DeleteCollection(options *v1.DeleteOptions, listOptions v1.ListOptions) error {
+	var timeout time.Duration
+	if listOptions.TimeoutSeconds != nil {
+		timeout = time.Duration(*listOptions.TimeoutSeconds) * time.Second
+	}
 	return c.client.Delete().
 		Namespace(c.ns).
 		Resource("brokers").
 		VersionedParams(&listOptions, scheme.ParameterCodec).
+		Timeout(timeout).
 		Body(options).
 		Do().
 		Error()

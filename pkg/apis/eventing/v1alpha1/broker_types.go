@@ -17,18 +17,25 @@
 package v1alpha1
 
 import (
-	"github.com/knative/pkg/apis"
-	duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
-	"github.com/knative/pkg/kmeta"
-	"github.com/knative/pkg/webhook"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	eventingduckv1alpha1 "knative.dev/eventing/pkg/apis/duck/v1alpha1"
+	"knative.dev/pkg/apis"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
+	duckv1alpha1 "knative.dev/pkg/apis/duck/v1alpha1"
+	"knative.dev/pkg/kmeta"
 )
 
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
+// Broker collects a pool of events that are consumable using Triggers. Brokers
+// provide a well-known endpoint for event delivery that senders can use with
+// minimal knowledge of the event routing strategy. Receivers use Triggers to
+// request delivery of events from a Broker's pool to a specific URL or
+// Addressable endpoint.
 type Broker struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional
@@ -45,31 +52,32 @@ type Broker struct {
 
 var (
 	// Check that Broker can be validated, can be defaulted, and has immutable fields.
-	_ apis.Validatable   = (*Broker)(nil)
-	_ apis.Defaultable   = (*Broker)(nil)
-	_ apis.Immutable     = (*Broker)(nil)
-	_ runtime.Object     = (*Broker)(nil)
-	_ webhook.GenericCRD = (*Broker)(nil)
+	_ apis.Validatable = (*Broker)(nil)
+	_ apis.Defaultable = (*Broker)(nil)
+
+	// Check that Broker can return its spec untyped.
+	_ apis.HasSpec = (*Broker)(nil)
+
+	_ runtime.Object = (*Broker)(nil)
 
 	// Check that we can create OwnerReferences to a Broker.
 	_ kmeta.OwnerRefable = (*Broker)(nil)
 )
 
 type BrokerSpec struct {
-	// ChannelTemplate, if specified will be used to create all the Channels used internally by the
-	// Broker. Only Provisioner and Arguments may be specified. If left unspecified, the default
-	// Channel for the namespace will be used.
-	//
+	// ChannelTemplate specifies which Channel CRD to use to create all the Channels used internally by the
+	// Broker. If left unspecified, it is set to the default Channel CRD for the namespace (or cluster, in case there
+	// are no defaults for the namespace).
 	// +optional
-	ChannelTemplate *ChannelSpec `json:"channelTemplate,omitempty"`
+	ChannelTemplate *eventingduckv1alpha1.ChannelTemplateSpec `json:"channelTemplateSpec,omitempty"`
 }
 
 // BrokerStatus represents the current state of a Broker.
 type BrokerStatus struct {
-	// inherits duck/v1alpha1 Status, which currently provides:
+	// inherits duck/v1 Status, which currently provides:
 	// * ObservedGeneration - the 'Generation' of the Service that was last processed by the controller.
 	// * Conditions - the latest available observations of a resource's current state.
-	duckv1alpha1.Status `json:",inline"`
+	duckv1.Status `json:",inline"`
 
 	// Broker is Addressable. It currently exposes the endpoint as a
 	// fully-qualified DNS name which will distribute traffic over the
@@ -77,6 +85,12 @@ type BrokerStatus struct {
 	//
 	// It generally has the form {broker}-router.{namespace}.svc.{cluster domain name}
 	Address duckv1alpha1.Addressable `json:"address,omitempty"`
+
+	// TriggerChannel is an objectref to the object for the TriggerChannel
+	TriggerChannel *corev1.ObjectReference `json:"triggerChannel,omitempty"`
+
+	// IngressChannel is an objectref to the object for the IngressChannel
+	IngressChannel *corev1.ObjectReference `json:"IngressChannel,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -92,4 +106,9 @@ type BrokerList struct {
 // GetGroupVersionKind returns GroupVersionKind for Brokers
 func (t *Broker) GetGroupVersionKind() schema.GroupVersionKind {
 	return SchemeGroupVersion.WithKind("Broker")
+}
+
+// GetUntypedSpec returns the spec of the Broker.
+func (b *Broker) GetUntypedSpec() interface{} {
+	return b.Spec
 }

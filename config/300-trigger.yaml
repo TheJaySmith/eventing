@@ -17,10 +17,14 @@ kind: CustomResourceDefinition
 metadata:
   name: triggers.eventing.knative.dev
   labels:
+    eventing.knative.dev/release: devel
     knative.dev/crd-install: "true"
 spec:
   group: eventing.knative.dev
-  version: v1alpha1
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
   names:
     kind: Trigger
     plural: triggers
@@ -67,21 +71,22 @@ spec:
                       type: string
                     source:
                       type: string
+                attributes:
+                  type: object
+                  description: "Map of CloudEvents attributes used for filtering events."
+                  additionalProperties:
+                    type: string
             subscriber:
               type: object
+              description: "the destination that should receive events."
               properties:
-                dnsName:
-                  type: string
-                  minLength: 1
-                uri:
-                  type: string
-                  minLength: 1
                 ref:
                   type: object
+                  description: "a reference to a Kubernetes object from which to retrieve the target URI."
                   required:
-                    - apiVersion
-                    - kind
-                    - name
+                  - apiVersion
+                  - kind
+                  - name
                   properties:
                     apiVersion:
                       type: string
@@ -92,3 +97,6 @@ spec:
                     name:
                       type: string
                       minLength: 1
+                uri:
+                  type: string
+                  description: "the target URI or, if ref is provided, a relative URI reference that will be combined with ref to produce a target URI."
